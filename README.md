@@ -829,6 +829,11 @@ Statutory pools are keyed to match the statute rather than to the taxpayer unifo
 - **§415(c) annual additions** apply **per employer**, so unrelated employers carry
   independent limits. Set `annualAdditionsGroupId` on the plan rules to aggregate plans
   of a controlled or affiliated service group under §414(b)/(c)/(m)/(o) and §415(h).
+- **Identifier fields** — `employerId` and `annualAdditionsGroupId` — must be non-empty
+  strings when supplied; `undefined` and `null` both mean absent. A number or an empty
+  string is rejected with `INVALID_EMPLOYER_ID` / `INVALID_ANNUAL_ADDITIONS_GROUP_ID`
+  rather than coerced, because JavaScript and PHP disagree about `0`, `"0"` and `""`,
+  and `employerId` selects the wage figure the §414(v)(7)(A) test reads.
 - **§414(v)(7)(A)** Roth catch-up classification tests prior-year FICA wages from the
   **sponsoring employer**, supplied through `priorYearFicaWages(employerId, amount)`.
   The figure is required only where the test can change the answer. §414(v)(7)(A) does
@@ -852,6 +857,55 @@ Statutory pools are keyed to match the statute rather than to the taxpayer unifo
   catch-up raises no such question and does not. The §402(g)(7) and §457(b)(3)
   special catch-ups are separate provisions that §414(v)(7)(A) does not reach, so
   neither is read here.
+
+  Where those wages *are* supplied and exceed the threshold, an existing pre-tax
+  catch-up is not merely unclassified — the supplied facts say it was not a
+  contribution §414(v)(1) permitted, since that paragraph applies "only if" the
+  additional elective deferrals are designated Roth contributions. The account
+  returns `indeterminate` with
+  `EXISTING_PRE_TAX_CATCH_UP_ABOVE_ROTH_CATCH_UP_WAGE_THRESHOLD`, and no further
+  catch-up is allocated: whether the supplied amount counts against the
+  §414(v)(2)(B) limit at all is what is in doubt, so the room above it is not a
+  figure to state. The component and its tax effect are retained as supplied
+  rather than discarded or recharacterised — the caller stated a statutory
+  provenance through the component key, and the `indeterminate` status is what
+  marks the figure as unsettled. §457 mutual-exclusivity breaches are handled the
+  same way.
+
+  The doubt is pool-wide. The §414(v) limit is the participant's rather than the
+  plan's, so an unreconciled amount has already been charged against a limit the
+  participant's other plans draw on, and a sibling account is not offered the
+  residue — a $3,000 amount in doubt does not leave a real $5,000 for the next
+  account. Those accounts return `indeterminate` with
+  `CATCH_UP_ALLOCATION_BLOCKED_BY_UNRECONCILED_EXISTING_PRE_TAX_CATCH_UP`, naming
+  the account to fix. It does not reach across pools: §415(a) does not reach an
+  eligible deferred compensation plan and §457(b)(2) sets its ceiling from
+  §457(e)(15), so a §457 account is unaffected by a qualified plan's unreconciled
+  amount, and the reverse.
+
+  §414(v)(6)(C) takes the whole question away where it applies: *"This subsection
+  shall not apply to a participant for any year for which a higher limitation
+  applies to the participant under section 457(b)(3)."* Subsection means all of
+  §414(v), paragraph (7) included, so on a §457(b) account whose participant-wide
+  resolution selected the special last-three-years method there is no wage test to
+  run and no existing component for it to reject — the amount is reported under
+  `SECTION_457_CATCH_UP_RECORDED_UNDER_UNSELECTED_METHOD` and nothing else. It is
+  also not charged against a §414(v)(2)(B) limit, so it blocks no sibling.
+
+  It also reaches only accounts the doubt can change. An account with no room
+  left for a catch-up — its plan offers none, or its base deferral has already
+  consumed the compensation a §414(v)(2)(A) additional elective deferral would
+  need — is unaffected, because reconciling the sibling cannot create room there.
+  Such an account stays `determinate`. The wages themselves are still asked for
+  wherever the account carries an existing pre-tax catch-up, since that question
+  is about a contribution already made rather than about room for another.
+
+  `HIGH_WAGE_CATCH_UP_ALLOCATED_AS_ROTH` is reported only where a catch-up was
+  actually allocated, because that is what it says. The classification is bounded
+  by the plan limit and by compensation but not by the owner's shared §414(v) pool,
+  so an account whose plan leaves room can still draw nothing once another plan has
+  validly taken the year's whole catch-up — and an account that allocated nothing
+  does not announce that its catch-up went in as Roth.
 
 Whether two employers are a single employer for §415 is a legal determination about
 ownership, so it is a caller-supplied fact rather than something inferred from the inputs.

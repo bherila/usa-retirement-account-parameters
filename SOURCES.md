@@ -81,6 +81,90 @@ Source metadata documents provenance; it is not fetched at runtime. Calculations
   `SHA256SUMS.txt`.
   `https://uscode.house.gov/view.xhtml?req=granuleid:USC-prelim-title26-section402A&num=0&edition=prelim`
 
+- **26 U.S.C. §414(v)(6)(A) and §414(v)(7)** — which plans the mandatory-Roth catch-up rule
+  reaches. §414(v)(7)(A) opens "Except as provided in subparagraph (C)", and subparagraph (C)
+  disapplies it "in the case of an applicable employer plan described in paragraph
+  (6)(A)(iv)". Clause (iv) is "an arrangement meeting the requirements of section 408(k) or
+  (p)" — a SEP or SARSEP, and a SIMPLE IRA. It is **not** §401(k)(11), so a SIMPLE 401(k) is
+  not excepted: it is an employees' trust described in §401(a) and exempt under §501(a),
+  which is clause (i). The two SIMPLE families therefore part company here, which is why the
+  engine keys the exemption on the account's family rather than on its `isSimple` trait, and
+  why the conformance vectors pin both halves. Quoted from the current Code rather than
+  paraphrased, because the natural reading of "SIMPLE plans are excepted" is wrong.
+
+  The same section carries **§414(v)(6)(C)**, "Exception for section 457 plans": *"This
+  subsection shall not apply to a participant for any year for which a higher limitation
+  applies to the participant under section 457(b)(3)."* It disapplies the whole
+  subsection rather than paragraph (1) alone, so paragraph (7) goes with it — where the
+  participant-wide §457 resolution selects the special last-three-years method, the
+  §414(v)(7)(A) wage test has nothing to say about that year, and an existing component
+  recorded as an age-based catch-up is reported only as recorded under the unselected
+  method.
+
+  §414(v)(6)(C) says "to a participant", not "to that plan". Read alone it would strip
+  the age-based catch-up from *every* plan of a participant who used the §457(b)(3)
+  catch-up, an unrelated §401(k) included. **26 CFR 1.414(v)-1(a)(3) supplies the scope
+  the statute omits:** *"In the case of an applicable employer plan that is a section 457
+  eligible governmental plan, the catch-up contributions permitted under this section
+  shall not apply to a catch-up eligible participant for any taxable year for which a
+  higher limitation applies to such participant under section 457(b)(3)."*
+  §1.414(v)-1(e)(3) confirms it from the other side — a plan does not fail universal
+  availability *"merely because another applicable employer plan that is a section 457
+  eligible governmental plan does not provide for catch-up contributions to the extent
+  set forth in section 414(v)(6)(C)"* — a sentence with no work to do unless the other
+  plans keep their catch-up. So the exception is confined to the §457 eligible
+  governmental plan, which is how the engine applies it.
+
+  The same regulation settles the separation of the two catch-up pools.
+  §1.414(v)-1(f)(1): *"all applicable employer plans, other than section 457 eligible
+  governmental plans, maintained by the same employer are treated as one plan and all
+  section 457 eligible governmental plans maintained by the same employer are treated as
+  one plan"*, so that each group is separately *"limited to the applicable dollar
+  catch-up limit for the taxable year"*. The engine's split between a §457 pool and a
+  qualified pool had been justified from §415(a) and §457(b)(2); this states it directly.
+
+  The enacted text of §414 is committed as
+  `evidence/retirement-limits/sources/usc-26-414.html` and fixed by `SHA256SUMS.txt`.
+  `https://uscode.house.gov/view.xhtml?req=granuleid:USC-prelim-title26-section414&num=0&edition=prelim`
+
+- **26 U.S.C. §402(g)(1)(C), struck by SECURE 2.0 §603(b)(1), and Notice 2023-62** — why the
+  §414(v) catch-up pool is keyed to the participant rather than to the plan or the employer,
+  and why a catch-up that fails §414(v) falls back onto the ordinary elective-deferral limit.
+
+  §414(v)(2)(A) is a **plan**-level rule — *"A plan shall not permit additional elective
+  deferrals … greater than the lesser of"* — and 26 CFR 1.414(v)-1(f)(1) aggregates plans of
+  the *same employer* for it, and only "for purposes of paragraph (c)". Neither reaches an
+  individual holding plans at two unrelated employers. The participant-level cap came from
+  §402(g)(1)(C), which limited what **an eligible participant's gross income** could exclude
+  for **the taxable year**, *"without regard to the treatment of the elective deferrals by an
+  applicable employer plan under section 414(v)"* — a parenthetical that decouples the
+  individual's exclusion from any plan's treatment, which is exactly the two-employer case.
+
+  SECURE 2.0 §603(b)(1) **struck** that subparagraph, and it survives in the current Code only
+  in the amendment notes — where a text search finds it and can be mistaken for operative law.
+  **Notice 2023-62 preserves its result:** *"The elimination of section 402(g)(1)(C) of the
+  Code under section 603(b)(1) of the SECURE 2.0 Act does not change this result for taxable
+  years beginning after December 31, 2023"*, the result being that deferrals above the
+  §402(g)(1)(B) amount stay out of gross income if they satisfy §414(v).
+
+  Two consequences the engine depends on. The catch-up limit is one per participant per year
+  across every employer, so a block that follows the participant pool is correctly scoped.
+  And **validity decides which limitation an amount draws on**: a catch-up satisfying §414(v)
+  draws on the §414(v) limit and not the §402(g) one, while an amount that fails §414(v) is an
+  ordinary elective deferral subject to §402(g)(1)(A) unless corrected. That is why an amount
+  whose §414(v)(7)(A) validity is unresolved cannot be charged to either limitation as settled.
+
+  The notice is committed at `evidence/retirement-limits/sources/n-23-62.pdf` and hash-attested.
+  It is also the authority for the two-year transition period that makes
+  `rothCatchUpWageThreshold` null for catch-up years 2024 and 2025, which the corpus's
+  `reconciled` map asserts.
+
+- **26 CFR §1.414(v)-1** — the catch-up regulation, committed as
+  `evidence/retirement-limits/sources/cfr-26-1.414v-1.xml`, the eCFR API serialization at
+  issue date **2026-09-03**, and fixed by `SHA256SUMS.txt`. Retrieved from
+  `https://www.ecfr.gov/api/versioner/v1/full/2026-09-03/title-26.xml?part=1&section=1.414(v)-1`
+  rather than the eCFR web page, which refuses automated requests.
+
 ## Health savings account sources (IRC §223)
 
 HSA dollar amounts are published in an annual **Revenue Procedure**, not in the retirement

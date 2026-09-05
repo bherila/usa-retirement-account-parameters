@@ -207,7 +207,7 @@ function randomPlanRules(type) {
   const rules = {};
   if (chance(0.8)) rules.planCompensation = money();
   if (chance(0.2)) rules.includibleCompensation457 = money();
-  if (chance(0.2)) rules.annualAdditionsGroupId = pick(["g1", "g2"]);
+  if (chance(0.2)) rules.annualAdditionsGroupId = pick(["g1", "g2", "0", 0, ""]);
   if (chance(0.15)) rules.planDocumentEmployeeDeferralLimit = money();
   if (chance(0.15)) rules.planDocumentAnnualAdditionsLimit = money();
   if (chance(0.4)) rules.permitsRothContributions = chance(0.05) ? junk() : chance(0.7);
@@ -371,7 +371,16 @@ function randomScenario() {
       ownerId: chance(0.03) ? "ghost" : pick(persons).id,
       type: chance(0.03) ? pick(["401K", "not_a_type", "", "hsa "]) : type,
     };
-    if (chance(0.3)) account.employerId = pick(["e1", "e2"]);
+    // "0" is an identifier the input contract accepts, and it is in the pool because
+    // PHP's empty() reads it as absent while JavaScript truthiness does not. That
+    // divergence shipped and this generator did not reach it.
+    //
+    // The malformed values sit beside it for the same reason and cost nothing: the
+    // input contract requires a non-empty string, so both engines must reject them
+    // identically rather than each coercing in its own direction. A numeric 0 was
+    // the second divergence here -- PHP read it as the employer "0" and classified
+    // a catch-up, TypeScript read it as absent and returned indeterminate.
+    if (chance(0.3)) account.employerId = pick(["e1", "e2", "0", 0, "", 1, null]);
     if (chance(0.3)) account.priority = integer(1, 200);
     if (chance(0.85)) account.planRules = randomPlanRules(type);
     if (chance(0.4)) account.existingContributions = randomExisting();
@@ -543,7 +552,7 @@ function randomScenario() {
     const owner = pick(persons);
     if (chance(0.75)) owner.birthYear = taxYear - pick([35, 45, 49, 50, 56, 61, 64]);
     else delete owner.birthYear;
-    const employerId = pick(["e1", "e2"]);
+    const employerId = pick(["e1", "e2", "0"]);
     const groupId = pick(["g1", "g2"]);
     // Which IRC 402A(f)(1) host. The governmental IRC 457(b) one at
     // IRC 402A(f)(1)(C) spends a different base pool (IRC 457(e)(15) rather than
@@ -646,7 +655,7 @@ function randomScenario() {
   // multi-account conflict outside the fuzz space.
   if (chance(0.3)) {
     const owner = pick(persons);
-    const employerId = pick(["e0", "e1"]);
+    const employerId = pick(["e0", "e1", "0"]);
     // The age is the fact the method choice turns on where neither IRC 457(b)(3)
     // amount clears the year's largest age-based catch-up, so it is dropped
     // outright a good part of the time rather than left to the generic 10%.
