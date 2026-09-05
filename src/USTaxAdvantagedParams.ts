@@ -12824,7 +12824,7 @@ function initializeHsaPools(context: CalculationContext, accounts: NormalizedAcc
    * decided until `divisionEligibilityDoubtPersons` below, which reads the
    * shares, so the branch is recorded here and reported afterwards.
    */
-  let defaultedDivision: "sole_spouse_account" | "equally" | null = null;
+  let defaultedDivision: "equally" | "equally_sole_account" | null = null;
   if (familySharingApplies) {
     /**
      * One number, not one per account: a share is a share of the couple's
@@ -12833,8 +12833,10 @@ function initializeHsaPools(context: CalculationContext, accounts: NormalizedAcc
      * only one spouse, shares totalling more than one, and shares totalling
      * less -- because none of those states can be expressed any more.
      *
-     * Where only one spouse owns an HSA the whole limitation goes to it; the
-     * other spouse has no account for a share to reach.
+     * Where only one spouse owns an HSA the statutory division still gives them
+     * half; the other half is their spouse's and goes unused for want of an
+     * account. Only an agreement moves it, which is the point of
+     * `HSA_SOLE_SPOUSE_ACCOUNT_TAKES_ONLY_ITS_EQUAL_SHARE`.
      */
     const taxpayerId = coupleMembersWithAccounts.find(
       (personId) => context.persons.get(personId)?.role === "taxpayer",
@@ -12851,14 +12853,31 @@ function initializeHsaPools(context: CalculationContext, accounts: NormalizedAcc
           personId === taxpayerId ? division.taxpayerShare : 1 - division.taxpayerShare,
         );
       }
-    } else if (coupleMembersWithAccounts.length === 1) {
-      shareByOwner.set(coupleMembersWithAccounts[0]!, 1);
-      defaultedDivision = "sole_spouse_account";
     } else if (division.status === "statutory_equal") {
+      /**
+       * Divided between *the spouses*, not between the spouses who happen to
+       * own an HSA. IRC 223(b)(5)(B)(ii) divides the limitation "equally between
+       * them", and "them" is "individuals who are married to each other" from
+       * the opening clause of paragraph (5) -- a phrase about a marriage, not
+       * about a pair of accounts. Owning an HSA is not a condition of being an
+       * eligible individual under IRC 223(c)(1), so a spouse with family
+       * coverage and no account still holds their half; they simply have
+       * nowhere to put it.
+       *
+       * So the divisor is the size of the couple, not the number of accounts.
+       * A sole owner takes 4375 of an 8750 limitation under the statutory
+       * division, and reaches the whole 8750 only through an agreement, which
+       * Notice 2004-50 Q&A-32 expressly lets the spouses make -- "including
+       * allocating nothing to one spouse". Reading ownership as that agreement
+       * would make the agreement mechanism unnecessary in the one case it is
+       * most often needed, and would contradict a caller who has just said in
+       * so many words that no different division was agreed.
+       */
+      const spouses = couple ? couple.length : coupleMembersWithAccounts.length;
       for (const personId of coupleMembersWithAccounts) {
-        shareByOwner.set(personId, 1 / coupleMembersWithAccounts.length);
+        shareByOwner.set(personId, 1 / spouses);
       }
-      defaultedDivision = "equally";
+      defaultedDivision = coupleMembersWithAccounts.length < spouses ? "equally_sole_account" : "equally";
     }
   }
 
@@ -12908,8 +12927,36 @@ function initializeHsaPools(context: CalculationContext, accounts: NormalizedAcc
           subminimumDeductibleByPerson.has(personId) && shareByOwner.get(personId) !== 0,
       )
     : [];
+  /**
+   * A division is only ever a fact about *something*. IRC 223(b)(5)(B)(ii)
+   * divides "the limitation under paragraph (1) ... after such reduction", and
+   * where that reduced limitation is zero every division of it is the same
+   * division: nought to each spouse, however they agreed or failed to agree.
+   * An unsettled share cannot move a result that no share can change, so it is
+   * not reported and it nulls nothing.
+   *
+   * This is the same principle as the exactly-zero-share case above, one level
+   * up: there the doubt could not move *these two* shares, here it cannot move
+   * *any* share. Both exist because an unknown that cannot change an answer is
+   * not an unknown worth withholding an answer for -- and the engine has
+   * previously withheld one, returning a null maximum for two spouses whose
+   * whole 8750 limitation had already been consumed by Archer MSA
+   * contributions under subparagraph (B)(i) and whose every possible division
+   * therefore yielded zero.
+   *
+   * `null` is not zero and does not qualify: an undeterminable amount is
+   * exactly the case where the engine cannot say the division is harmless.
+   */
+  const nothingLeftToDivide = sharedFamilyLimit !== null && sharedFamilyLimit <= 0;
   const householdDivisionUnknown =
-    householdDivisionIndeterminate || divisionEligibilityDoubtPersons.length > 0;
+    !nothingLeftToDivide &&
+    (householdDivisionIndeterminate || divisionEligibilityDoubtPersons.length > 0);
+  /**
+   * Whether a settled division is worth announcing. Same test: where nothing is
+   * left to divide, saying how it was divided is noise about nought, and where
+   * the division did not settle the INFO would contradict the ERROR beside it.
+   */
+  const divisionIsReportable = !householdDivisionUnknown && !nothingLeftToDivide;
 
   if (familySharingApplies && householdPoolAmountIndeterminate) {
     // IRC 223(b)(5)(A) gives the spouses one family limitation and (B)(ii)
@@ -12978,17 +13025,17 @@ function initializeHsaPools(context: CalculationContext, accounts: NormalizedAcc
     // the engine settled it without being told; `householdDivisionUnknown` says
     // it did not settle after all, and announcing a default alongside a null
     // share would contradict the same result twice over.
-    if (defaultedDivision === "sole_spouse_account" && !householdDivisionUnknown) {
+    if (defaultedDivision === "equally_sole_account" && divisionIsReportable) {
       sharingDiagnostics.push(
         diagnostic(
-          "HSA_SOLE_SPOUSE_ACCOUNT_ASSUMED_FULL_FAMILY_LIMIT",
+          "HSA_SOLE_SPOUSE_ACCOUNT_TAKES_ONLY_ITS_EQUAL_SHARE",
           DiagnosticSeverity.INFO,
-          "Only one spouse has a health savings account, so the whole IRC 223(b)(5) family limit is allocated to it. That is the division the spouses are assumed to have agreed on; the statutory default absent an agreement is an equal division.",
+          'Only one spouse has a health savings account, and no different division was agreed, so IRC 223(b)(5)(B)(ii) still divides the family limit equally between the spouses: this account takes half of it and the other half belongs to the spouse who has no account to use it. Owning the only HSA is not itself an agreement to a different division. If the spouses did agree to allocate the whole limit here, state it as hsaFamilyLimitDivision { status: "agreed", taxpayerShare } -- Notice 2004-50 Q&A-32 permits any division, "including allocating nothing to one spouse".',
           "accounts",
           "IRC 223(b)(5)(B)(ii)",
         ),
       );
-    } else if (defaultedDivision === "equally" && !householdDivisionUnknown) {
+    } else if (defaultedDivision === "equally" && divisionIsReportable) {
       sharingDiagnostics.push(
         diagnostic(
           "HSA_FAMILY_LIMIT_DIVIDED_EQUALLY_BY_DEFAULT",

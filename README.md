@@ -592,7 +592,37 @@ missing fact, and the Instructions for Form 8889 say the same. The three non-num
 exist because failing to establish the agreement is not the same input state as establishing
 its absence: contradictory records are equally consistent with "they agreed equally and one is
 wrong" and "they agreed 25/75 and the other is wrong", and defaulting those to 50/50 would
-overstate one spouse's limitation in the second case.
+overstate one spouse's limitation in the second case. `unknown`, `disputed` and `inconsistent`
+differ only in the wording of the diagnostic they produce; they are deliberately identical in
+effect, and should stay that way.
+
+**A spouse who owns the only HSA still gets half.** §223(b)(5)(B)(ii) divides "equally between
+them", and *them* is "individuals who are married to each other" from the opening clause of
+paragraph (5) — a phrase about a marriage, not about a pair of accounts. Owning an HSA is not a
+condition of being an eligible individual under §223(c)(1), so a spouse with family coverage and
+no account still holds their half and simply has nowhere to put it. A sole owner therefore takes
+$4,375 of an $8,750 limitation, reports `HSA_SOLE_SPOUSE_ACCOUNT_TAKES_ONLY_ITS_EQUAL_SHARE`, and
+reaches the whole $8,750 only through an agreement:
+
+```ts
+{ status: "agreed", taxpayerShare: 1 }   // Notice 2004-50 Q&A-32 permits exactly this
+```
+
+This changed in 0.5.0. Before it, an account-level model could not express a division at all, so
+the engine assumed a sole owner had agreed to take everything and reported
+`HSA_SOLE_SPOUSE_ACCOUNT_ASSUMED_FULL_FAMILY_LIMIT` with a `determinate_with_assumptions` status.
+Now that the division can be *stated*, assuming one would override a caller who has said in so
+many words that no different division was agreed. The status is `determinate`, because applying
+the statutory default is not an assumption. **If you relied on the old behaviour, state the
+agreement explicitly.**
+
+**An unknown division of nothing is still determinate.** The division is only ever a fact about
+something: where the limitation left after the §223(b)(5)(B)(i) Archer reduction is zero, every
+division of it is the same division, so an unsettled status changes no account's answer and
+nulls nothing. The same principle applies one level down — an eligibility doubt about a spouse
+whose agreed share is already exactly `0` stands aside, because that spouse gets nothing whether
+they are an eligible individual or not. Both rules exist because an unknown that cannot change
+an answer is not worth withholding an answer for.
 
 Two shapes are rejected outright, because each states an agreement and denies it in the same
 object: `{ status: "agreed" }` with no share raises
