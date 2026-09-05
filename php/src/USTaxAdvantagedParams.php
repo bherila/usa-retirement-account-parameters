@@ -322,6 +322,27 @@ final class PersonBuilder
         return $this;
     }
 
+    /**
+     * Elect the IRC 223(b)(8) last-month rule for this person. Omit the argument
+     * to leave the testing period unresolved. One election per person:
+     * IRC 223(b)(8)(A) treats "an individual", not an account.
+     */
+    public function hsaLastMonthRule(?bool $testingPeriodSatisfied = null): self
+    {
+        $this->value['hsaLastMonthRule']['useLastMonthRule'] = true;
+        if ($testingPeriodSatisfied !== null) {
+            $this->value['hsaLastMonthRule']['testingPeriodSatisfied'] = $testingPeriodSatisfied;
+        }
+        return $this;
+    }
+
+    /** IRC 223(b)(8)(B)(ii): the testing period was failed because of death or disability. */
+    public function hsaTestingPeriodFailureByDeathOrDisability(bool $failed = true): self
+    {
+        $this->value['hsaLastMonthRule']['testingPeriodFailureByDeathOrDisability'] = $failed;
+        return $this;
+    }
+
     /** @return array<string,mixed> */
     public function build(): array
     {
@@ -535,30 +556,6 @@ final class AccountBuilder
     public function hsaHdhpAnnualDeductible(float|int $amount): self
     {
         $this->value['planRules']['hsa']['hdhpAnnualDeductible'] = $amount;
-        return $this;
-    }
-
-    /** Elect the IRC 223(b)(8) last-month rule. Omit the argument to leave the testing period unresolved. */
-    public function hsaLastMonthRule(?bool $testingPeriodSatisfied = null): self
-    {
-        $this->value['planRules']['hsa']['useLastMonthRule'] = true;
-        if ($testingPeriodSatisfied !== null) {
-            $this->value['planRules']['hsa']['testingPeriodSatisfied'] = $testingPeriodSatisfied;
-        }
-        return $this;
-    }
-
-    /** IRC 223(b)(8)(B)(ii): the testing period was failed because of death or disability. */
-    public function hsaTestingPeriodFailureByDeathOrDisability(bool $failed = true): self
-    {
-        $this->value['planRules']['hsa']['testingPeriodFailureByDeathOrDisability'] = $failed;
-        return $this;
-    }
-
-    /** IRC 223(b)(5)(B)(ii) agreed share of the single family limit, 0 through 1. */
-    public function hsaFamilyLimitShare(float $share): self
-    {
-        $this->value['planRules']['hsa']['familyLimitShare'] = $share;
         return $this;
     }
 
@@ -815,6 +812,30 @@ final class ScenarioBuilder
             $configure($builder);
         }
         return $this->addConversion($builder);
+    }
+
+    /**
+     * IRC 223(b)(5)(B)(ii) agreed division of the one family limitation.
+     * $taxpayerShare is the taxpayer's share from 0 through 1; the spouse takes
+     * the remainder. Notice 2004-50 Q&A-32 permits any division, "including
+     * allocating nothing to one spouse".
+     */
+    public function hsaFamilyLimitDivision(float $taxpayerShare): self
+    {
+        $this->value['hsaFamilyLimitDivision'] = ['status' => 'agreed', 'taxpayerShare' => $taxpayerShare];
+        return $this;
+    }
+
+    /**
+     * Record that the IRC 223(b)(5)(B)(ii) division is not settled, so no share
+     * of the family limitation can be stated. `unknown` where the agreement fact
+     * was never obtained, `disputed` where the spouses report different
+     * divisions, `inconsistent` where two records of one division conflict.
+     */
+    public function hsaFamilyLimitDivisionUnsettled(string $status = 'unknown'): self
+    {
+        $this->value['hsaFamilyLimitDivision'] = ['status' => $status];
+        return $this;
     }
 
     public function build(): Scenario
@@ -8218,12 +8239,20 @@ final class Engine
         $treatedAsUnmarriedUnderSection21e4 = array_key_exists('treatedAsUnmarriedUnderSection21e4', $input)
             ? ($input['treatedAsUnmarriedUnderSection21e4'] === true)
             : null;
+        self::validateHsaFamilyLimitDivision(
+            $input['hsaFamilyLimitDivision'] ?? null,
+            'hsaFamilyLimitDivision',
+        );
+        $hsaFamilyLimitDivision = is_array($input['hsaFamilyLimitDivision'] ?? null)
+            ? $input['hsaFamilyLimitDivision']
+            : ['status' => 'statutory_equal'];
         $persons = self::normalizePersons($input['persons'] ?? null);
         $accounts = self::normalizeAccounts($input['accounts'] ?? null, $persons);
         $context = self::createContext(
             $taxYear,
             $filingStatus,
             $treatedAsUnmarriedUnderSection21e4,
+            $hsaFamilyLimitDivision,
             $parameters,
             $hsaParameters,
             $fsaParameters,
@@ -9618,6 +9647,10 @@ final class Engine
             if (array_key_exists('hsaCoverage', $input)) {
                 self::validateHsaCoverage($input['hsaCoverage'], "persons[{$index}].hsaCoverage");
             }
+            self::requireInputObject($input, 'hsaLastMonthRule', "persons[{$index}].hsaLastMonthRule");
+            if (array_key_exists('hsaLastMonthRule', $input)) {
+                self::validateHsaLastMonthRule($input['hsaLastMonthRule'], "persons[{$index}].hsaLastMonthRule");
+            }
             self::booleanFlag(
                 $input,
                 'coveredByEmployerRetirementPlan',
@@ -9955,10 +9988,65 @@ final class Engine
         self::money($rules['hdhpAnnualDeductible'] ?? null, "{$path}.hdhpAnnualDeductible");
     }
 
+    /**
+     * Fields that used to live on an account's `planRules.hsa` and now live on the
+     * person or the scenario. They are rejected rather than normalised: silently
+     * reading a moved field would let one owner's two accounts go on disagreeing
+     * about a fact that cannot vary between them, which is the state this move
+     * exists to make unrepresentable.
+     *
+     * @var list<array{0:string,1:string,2:string}>
+     */
+    private const RELOCATED_HSA_ACCOUNT_FIELDS = [
+        [
+            'familyLimitShare',
+            'HSA_ACCOUNT_LEVEL_FAMILY_LIMIT_SHARE_REMOVED',
+            'IRC 223(b)(5)(B)(ii) divides the one family limitation between the spouses, not between accounts. '
+                . 'Supply `hsaFamilyLimitDivision` on the scenario as { status: "agreed", taxpayerShare } instead.',
+        ],
+        [
+            'useLastMonthRule',
+            'HSA_ACCOUNT_LEVEL_LAST_MONTH_RULE_REMOVED',
+            'IRC 223(b)(8) applies to an individual, not to an account. '
+                . 'Supply `persons[].hsaLastMonthRule.useLastMonthRule` instead.',
+        ],
+        [
+            'testingPeriodSatisfied',
+            'HSA_ACCOUNT_LEVEL_LAST_MONTH_RULE_REMOVED',
+            'IRC 223(b)(8)(B)(iii) applies to an individual, not to an account. '
+                . 'Supply `persons[].hsaLastMonthRule.testingPeriodSatisfied` instead.',
+        ],
+        [
+            'testingPeriodFailureByDeathOrDisability',
+            'HSA_ACCOUNT_LEVEL_LAST_MONTH_RULE_REMOVED',
+            'IRC 223(b)(8)(B)(ii) applies to an individual, not to an account. '
+                . 'Supply `persons[].hsaLastMonthRule.testingPeriodFailureByDeathOrDisability` instead.',
+        ],
+    ];
+
+    /** The IRC 223(b)(5)(B)(ii) division statuses a caller may state. */
+    private const HSA_FAMILY_LIMIT_DIVISION_STATUSES = [
+        'statutory_equal',
+        'agreed',
+        'unknown',
+        'disputed',
+        'inconsistent',
+    ];
+
     /** @param array<string,mixed> $rules */
     private static function validateHsaRules(array $rules, string $path): void
     {
         self::validateHsaCoverage($rules, $path);
+        foreach (self::RELOCATED_HSA_ACCOUNT_FIELDS as [$field, $code, $guidance]) {
+            if (array_key_exists($field, $rules)) {
+                throw new ParameterException($code, "{$path}.{$field} was removed in 0.5.0. {$guidance}");
+            }
+        }
+    }
+
+    /** @param array<string,mixed> $rules */
+    private static function validateHsaLastMonthRule(array $rules, string $path): void
+    {
         self::booleanFlag($rules, 'useLastMonthRule', "{$path}.useLastMonthRule");
         self::booleanFlag($rules, 'testingPeriodSatisfied', "{$path}.testingPeriodSatisfied");
         self::booleanFlag(
@@ -9966,8 +10054,44 @@ final class Engine
             'testingPeriodFailureByDeathOrDisability',
             "{$path}.testingPeriodFailureByDeathOrDisability",
         );
-        if (array_key_exists('familyLimitShare', $rules)) {
-            self::rate($rules['familyLimitShare'], "{$path}.familyLimitShare");
+    }
+
+    private static function validateHsaFamilyLimitDivision(mixed $division, string $path): void
+    {
+        if ($division === null) {
+            return;
+        }
+        if (!is_array($division)) {
+            throw new ParameterException('INVALID_INPUT_OBJECT', "{$path} must be an object.");
+        }
+        $status = $division['status'] ?? null;
+        if (!is_string($status) || !in_array($status, self::HSA_FAMILY_LIMIT_DIVISION_STATUSES, true)) {
+            $allowed = implode(', ', self::HSA_FAMILY_LIMIT_DIVISION_STATUSES);
+            throw new ParameterException(
+                'INVALID_HSA_FAMILY_LIMIT_DIVISION_STATUS',
+                "{$path}.status must be one of {$allowed}.",
+            );
+        }
+        $hasShare = array_key_exists('taxpayerShare', $division);
+        $share = $division['taxpayerShare'] ?? null;
+        if ($status === 'agreed') {
+            // `null` is rejected alongside an absent key: `rate` treats both as
+            // "absent" and returns its default, which would silently read a
+            // stated-but-empty share as a taxpayer share of 0.
+            if (!$hasShare || $share === null) {
+                throw new ParameterException(
+                    'HSA_FAMILY_LIMIT_DIVISION_SHARE_REQUIRED',
+                    "{$path}.taxpayerShare is required when status is \"agreed\".",
+                );
+            }
+            self::rate($share, "{$path}.taxpayerShare");
+        } elseif ($hasShare) {
+            // A share beside any other status would state an agreement and deny it in
+            // the same object; which half to believe is not something to guess at.
+            throw new ParameterException(
+                'HSA_FAMILY_LIMIT_DIVISION_SHARE_NOT_PERMITTED',
+                "{$path}.taxpayerShare is permitted only when status is \"agreed\".",
+            );
         }
     }
 
@@ -10332,6 +10456,7 @@ final class Engine
         int $taxYear,
         string $filingStatus,
         ?bool $treatedAsUnmarriedUnderSection21e4,
+        array $hsaFamilyLimitDivision,
         array $parameters,
         ?array $hsaParameters,
         ?array $fsaParameters,
@@ -10350,6 +10475,7 @@ final class Engine
             'taxYear' => $taxYear,
             'filingStatus' => $filingStatus,
             'treatedAsUnmarriedUnderSection21e4' => $treatedAsUnmarriedUnderSection21e4,
+            'hsaFamilyLimitDivision' => $hsaFamilyLimitDivision,
             'parameters' => $parameters,
             'hsaParameters' => $hsaParameters,
             'hsaSupportedTaxYears' => $hsaData['supportedTaxYears'],
@@ -12493,12 +12619,6 @@ final class Engine
                         ?? array_fill(0, self::HSA_MONTHS_IN_YEAR, null),
                 ];
             }
-            $shareValues = [];
-            $lastMonthRuleValues = [];
-            foreach ($accountVariants as $variant) {
-                $shareValues[] = $variant['familyLimitShare'] ?? null;
-                $lastMonthRuleValues[] = $variant['useLastMonthRule'] ?? null;
-            }
             $facts[$ownerId] = [
                 'ownerId' => $ownerId,
                 'rules' => $rules,
@@ -12515,12 +12635,14 @@ final class Engine
                  */
                 'coverageVariants' => $coverageVariants,
                 /**
-                 * persons[].hsaCoverage carries neither field, so it does not vote
-                 * on either; only the person's own accounts can disagree about the
-                 * IRC 223(b)(5)(B)(ii) division or the IRC 223(b)(8) election.
+                 * IRC 223(b)(8) facts for this person. One election per person, so
+                 * there is nothing here for the person's accounts to disagree
+                 * about -- which is why the two conflict detectors that used to sit
+                 * beside this field are gone.
                  */
-                'familyLimitShareConflict' => !self::unanimousField($shareValues),
-                'useLastMonthRuleConflict' => !self::unanimousField($lastMonthRuleValues),
+                'lastMonthRule' => is_array($context['persons'][$ownerId]['hsaLastMonthRule'] ?? null)
+                    ? $context['persons'][$ownerId]['hsaLastMonthRule']
+                    : [],
                 'months' => $rules === null ? null : self::resolveHsaMonths($rules),
             ];
         }
@@ -12946,39 +13068,40 @@ final class Engine
              * unanswered usually leaves the other answered:
              *
              *   (A) gives the spouses one family limitation. Whether *that
-             *       amount* is knowable is $familyPoolAmountIndeterminate.
+             *       amount* is knowable is $familyPoolAmountIndeterminate, and it
+             *       is a per-owner question because it is built from each
+             *       spouse's coverage facts.
              *   (B)(ii) divides that one limitation between them, equally unless
              *       they agree otherwise. Whether *the division* is knowable is
-             *       $familyDivisionIndeterminate.
+             *       $householdDivisionIndeterminate, below, and it is not a
+             *       per-owner question at all: the division is one statement
+             *       about the couple, so there is no owner to attribute it to.
+             *       This is what moving the division off the account bought --
+             *       the flag that used to sit beside
+             *       $familyPoolAmountIndeterminate here could only ever be set by
+             *       two of one owner's accounts contradicting each other about a
+             *       fact that was never theirs to state.
              *
-             * They were one flag until the two were separated, which nulled a
-             * perfectly knowable couple-wide ceiling whenever the spouses' agreed
-             * shares contradicted each other -- an amount the statute fixes from
-             * coverage facts alone, withheld because of a disagreement about who
-             * may use it.
-             *
-             * Both are narrower questions than whether this owner's overall result
-             * is determinable. A missing birth year makes only the IRC 223(b)(3)
-             * age-55 amount unknown and leaves the IRC 223(b)(5) family limit
-             * perfectly knowable, so it deliberately sets neither. Neither does the
-             * bare fact that this person's coverage statements disagree: see
-             * $familyOperandConflict below, which asks which operand they disagree
-             * about.
+             * The amount question is narrower than whether this owner's overall
+             * result is determinable. A missing birth year makes only the IRC
+             * 223(b)(3) age-55 amount unknown and leaves the IRC 223(b)(5) family
+             * limit perfectly knowable, so it deliberately does not set it. Neither
+             * does the bare fact that this person's coverage statements disagree:
+             * see $familyOperandConflict below, which asks which operand they
+             * disagree about.
              */
             $familyPoolAmountIndeterminate = false;
-            $familyDivisionIndeterminate = false;
 
             /*
              * Does this owner's disagreement actually reach the couple's IRC
              * 223(b)(5) ceiling? That ceiling is the divided family limitation
              * *plus* the spouses' undivided self-only portions, so the question is
-             * which inputs can change familyPortionApplied, selfPortionApplied or
-             * the division. HsaRulesInput is a closed surface of eight fields, so
-             * the answer is enumerable rather than guessable -- an earlier attempt
-             * listed only the operands of the divided family amount and let a
-             * self-only month, a self-only deductible and the IRC 223(b)(8)
-             * election through, each of which then fixed the ceiling from whichever
-             * account happened to be listed first:
+             * which inputs can change familyPortionApplied or selfPortionApplied.
+             * HsaRulesInput is a closed surface of four fields, so the answer is
+             * enumerable rather than guessable -- an earlier attempt listed only
+             * the operands of the divided family amount and let a self-only month
+             * and a self-only deductible through, each of which then fixed the
+             * ceiling from whichever account happened to be listed first:
              *
              *   coverageTier, eligibleMonths, monthlyCoverage  reach it: tier and
              *       months of both portions.
@@ -12987,19 +13110,15 @@ final class Engine
              *       through the IRC 223(b)(5)(A) lowest-deductible comparison, and
              *       self-only months through the undivided self portion, which is
              *       why no family month is required for it to matter.
-             *   useLastMonthRule  reaches it: IRC 223(b)(8) replaces the prorated
-             *       amount with December's annualized one.
-             *   familyLimitShare  reaches the division and nothing else. IRC
-             *       223(b)(5)(B)(ii) divides a limitation subparagraph (A) has
-             *       already fixed, so a disagreement about the shares cannot move
-             *       the amount being shared -- which is why it is the one field
-             *       here that sets the division flag rather than the amount one.
-             *   testingPeriodSatisfied, testingPeriodFailureByDeathOrDisability do
-             *       not. They are read only into the reported testing-period
-             *       obligation, never into either portion, so a disagreement about
-             *       a future compliance fact leaves this year's ceiling knowable.
              *
-             * A ninth field must be classified here rather than defaulting to inert.
+             * A fifth field must be classified here rather than defaulting to
+             * inert.
+             *
+             * The IRC 223(b)(8) election is no longer among them, and its absence
+             * is not an oversight: it does reach the ceiling, but it is one
+             * election per person under IRC 223(b)(8)(A), so an owner's accounts
+             * have nothing left to disagree about. Same for the testing-period
+             * facts, which never reached either portion in the first place.
              */
             $ownerSlots = $coverageSlotsByPerson[$ownerId] ?? null;
             $deductibleValues = [];
@@ -13018,13 +13137,9 @@ final class Engine
                 || in_array('unknown', $ownerSlots, true)
                 || ($parameters['contributionLimitCappedByHdhpAnnualDeductible']
                     && !$deductibleUnanimous
-                    && $ownerHasCoveredMonth)
-                || $owner['useLastMonthRuleConflict'];
+                    && $ownerHasCoveredMonth);
             if ($amountInputsIndeterminate) {
                 $familyPoolAmountIndeterminate = true;
-            }
-            if ($owner['familyLimitShareConflict']) {
-                $familyDivisionIndeterminate = true;
             }
 
             if ($owner['conflict']) {
@@ -13413,7 +13528,7 @@ final class Engine
             $selfPortionApplied = $selfPortionWithoutLastMonthRule;
             $catchUpApplied = $catchUpWithoutLastMonthRule;
 
-            if (!empty($owner['rules']['useLastMonthRule'])) {
+            if (!empty($owner['lastMonthRule']['useLastMonthRule'])) {
                 $decemberTier = $months[self::HSA_MONTHS_IN_YEAR - 1];
                 if ($parameters['lastMonthRuleAvailable'] !== true) {
                     $diagnostics[] = self::diagnostic(
@@ -13501,7 +13616,6 @@ final class Engine
                 'diagnostics' => $diagnostics,
                 'indeterminate' => $indeterminate,
                 'familyPoolAmountIndeterminate' => $familyPoolAmountIndeterminate,
-                'familyDivisionIndeterminate' => $familyDivisionIndeterminate,
             ];
         }
 
@@ -13568,23 +13682,163 @@ final class Engine
         }
         /**
          * The other question, asked separately. IRC 223(b)(5)(B)(ii) divides one
-         * limitation between the spouses, so a spouse whose own accounts state
-         * contradictory shares makes *the division* undeterminable while leaving
-         * the amount being divided exactly as computable as it was: subparagraph
-         * (A) fixes that amount from coverage facts, which a disagreement about
-         * shares does not touch.
+         * limitation between the spouses, so a couple whose stated division is
+         * itself unsettled leaves *the division* undeterminable while the amount
+         * being divided stays exactly as computable as it was: subparagraph (A)
+         * fixes that amount from coverage facts, which an unsettled division does
+         * not touch.
+         *
+         * `unknown`, `disputed` and `inconsistent` are the three ways the caller
+         * can say it is unsettled; `statutory_equal` and `agreed` both settle it.
          */
-        $householdDivisionIndeterminate = false;
-        foreach ($coupleMembersWithAccounts as $personId) {
-            if (($amountsByOwner[$personId]['familyDivisionIndeterminate'] ?? false) === true) {
-                $householdDivisionIndeterminate = true;
+        $divisionUnsettled = in_array(
+            $context['hsaFamilyLimitDivision']['status'] ?? null,
+            ['unknown', 'disputed', 'inconsistent'],
+            true,
+        );
+        $householdDivisionIndeterminate = $divisionUnsettled;
+        $familyPoolKey = $couple === null ? null : "{$couple[0]}|{$couple[1]}";
+
+        /**
+         * The IRC 223(b)(5)(B)(ii) division, taken from the one place it can be
+         * stated. Omitted means statutory_equal: the statute divides equally
+         * "unless they agree on a different division", so silence is the default
+         * rule rather than a missing fact, and the Instructions for Form 8889 say
+         * the same -- "divide the amount on line 5 equally between you and your
+         * spouse, unless you both agree on a different allocation".
+         *
+         * The three non-numeric statuses are why this is a status rather than a
+         * nullable number. Failing to establish the agreement is not the same
+         * input state as establishing its absence: contradictory records are
+         * equally consistent with "they agreed equally and one is wrong" and "they
+         * agreed 25/75 and the other is wrong", and defaulting those to an equal
+         * split would overstate one spouse's limitation in the second case.
+         *
+         * @var array<string,mixed> $division
+         */
+        $division = $context['hsaFamilyLimitDivision'];
+        $shareByOwner = [];
+        $sharingDiagnostics = [];
+        /*
+         * Which branch of the division applied. The two INFO branches announce a
+         * division the engine settled on the caller's behalf, so they must not be
+         * emitted where the division turns out to be unknown -- an account cannot
+         * be told both that the limit was divided equally by default and that the
+         * division is indeterminate with a null share. Whether it is unknown is
+         * not decided until $divisionEligibilityDoubtPersons below, which reads
+         * the shares, so the branch is recorded here and reported afterwards.
+         */
+        $defaultedDivision = null;
+        if ($familySharingApplies) {
+            /*
+             * One number, not one per account: a share is a share of the couple's
+             * single limitation, so the other spouse takes the remainder. That
+             * deletes three diagnostics the account-level model needed -- a share
+             * supplied by only one spouse, shares totalling more than one, and
+             * shares totalling less -- because none of those states can be
+             * expressed any more.
+             *
+             * Where only one spouse owns an HSA the statutory division still gives
+             * them half; the other half is their spouse's and goes unused for want
+             * of an account. Only an agreement moves it, which is the point of
+             * HSA_SOLE_SPOUSE_ACCOUNT_TAKES_ONLY_ITS_EQUAL_SHARE.
+             */
+            $taxpayerId = null;
+            foreach ($coupleMembersWithAccounts as $personId) {
+                if (($context['persons'][$personId]['role'] ?? null) === 'taxpayer') {
+                    $taxpayerId = $personId;
+                    break;
+                }
+            }
+            if (($division['status'] ?? null) === 'agreed') {
+                // Notice 2004-50 Q&A-32 lets the spouses divide "in any way they
+                // want, including allocating nothing to one spouse", so an agreed
+                // share binds whether or not the other spouse owns an HSA. A sole
+                // owner who agreed to less than the whole limitation keeps that
+                // agreement; the remainder is the other spouse's to use or not, and
+                // is not forfeited to this account.
+                $taxpayerShare = (float) $division['taxpayerShare'];
+                foreach ($coupleMembersWithAccounts as $personId) {
+                    $shareByOwner[$personId] = $personId === $taxpayerId
+                        ? $taxpayerShare
+                        : 1 - $taxpayerShare;
+                }
+            } elseif (($division['status'] ?? null) === 'statutory_equal') {
+                /*
+                 * Divided between *the spouses*, not between the spouses who happen
+                 * to own an HSA. IRC 223(b)(5)(B)(ii) divides the limitation
+                 * "equally between them", and "them" is "individuals who are
+                 * married to each other" from the opening clause of paragraph (5)
+                 * -- a phrase about a marriage, not about a pair of accounts.
+                 * Owning an HSA is not a condition of being an eligible individual
+                 * under IRC 223(c)(1), so a spouse with family coverage and no
+                 * account still holds their half; they simply have nowhere to put
+                 * it.
+                 *
+                 * So the divisor is the size of the couple, not the number of
+                 * accounts. A sole owner takes 4375 of an 8750 limitation under the
+                 * statutory division, and reaches the whole 8750 only through an
+                 * agreement, which Notice 2004-50 Q&A-32 expressly lets the spouses
+                 * make -- "including allocating nothing to one spouse". Reading
+                 * ownership as that agreement would make the agreement mechanism
+                 * unnecessary in the one case it is most often needed, and would
+                 * contradict a caller who has just said in so many words that no
+                 * different division was agreed.
+                 */
+                /*
+                 * Between spouses who are *eligible individuals*, which is neither
+                 * the whole couple nor the account owners. Notice 2004-50 Q&A-31
+                 * puts the qualification in so many words -- "if only one spouse is
+                 * an eligible individual, only that spouse may contribute to an HSA
+                 * (notwithstanding the treatment under section 223(b)(5)(A) of both
+                 * spouses as having only family coverage)" -- and its Example (1)
+                 * gives H the whole 5000 because W's plan is not a high deductible
+                 * health plan. The "notwithstanding" is the load-bearing word:
+                 * subparagraph (A) deems both spouses to have family coverage, and
+                 * that deeming does not make an ineligible spouse eligible for this
+                 * purpose.
+                 *
+                 * Only a spouse the caller has positively placed outside
+                 * eligibility is excluded: hsaCoverage of {} records that this
+                 * person held no high deductible health plan coverage in any month,
+                 * so every resolved slot is "none". A spouse who stated nothing at
+                 * all has no slots and is not excluded -- absence of a statement is
+                 * not a statement of absence -- and neither is a spouse eligible in
+                 * even one month.
+                 */
+                $eligibleSpouses = [];
+                foreach (($couple ?? $coupleMembersWithAccounts) as $personId) {
+                    $slots = $coverageSlotsByPerson[$personId] ?? null;
+                    $anyCovered = false;
+                    foreach ($slots ?? [] as $slot) {
+                        if ($slot !== 'none') {
+                            $anyCovered = true;
+                            break;
+                        }
+                    }
+                    if ($slots === null || $anyCovered) {
+                        $eligibleSpouses[] = $personId;
+                    }
+                }
+                $spouses = max(count($eligibleSpouses), 1);
+                foreach ($coupleMembersWithAccounts as $personId) {
+                    // An ineligible spouse who nonetheless owns an HSA takes no
+                    // share; Q&A-31 lets only the eligible spouse contribute.
+                    $shareByOwner[$personId] = in_array($personId, $eligibleSpouses, true)
+                        ? 1 / $spouses
+                        : 0.0;
+                }
+                $defaultedDivision = count($eligibleSpouses) < 2
+                    ? 'sole_eligible_spouse'
+                    : (count($coupleMembersWithAccounts) < $spouses ? 'equally_sole_account' : 'equally');
             }
         }
+
         /*
-         * A second reason the division can be unknown, and it is not a
-         * disagreement about shares. IRC 223(b)(5)(B)(ii) divides the limitation
-         * between the spouses, but Notice 2004-50 Q&A-31 is explicit that the
-         * division presupposes two eligible individuals: "if only one spouse is an
+         * A second reason the division can be unknown, and it is not the couple's
+         * own statement of it. IRC 223(b)(5)(B)(ii) divides the limitation between
+         * the spouses, but Notice 2004-50 Q&A-31 is explicit that the division
+         * presupposes two eligible individuals: "if only one spouse is an
          * eligible individual, only that spouse may contribute to an HSA
          * (notwithstanding the treatment under section 223(b)(5)(A) of both
          * spouses as having only family coverage)". Example (1) of that Q&A works
@@ -13592,13 +13846,23 @@ final class Engine
          * deductible health plan, contributes nothing.
          *
          * Ordinarily the caller's month list *is* the eligibility assertion and
-         * the equal division follows from it, which is why this engine can divide
+         * the division follows from it, which is why this engine can divide
          * without testing IRC 223(c)(1). A subminimum deductible is precisely the
          * case where that assertion is contradicted by another fact from the same
          * caller, so the engine cannot tell whether the couple's limitation
          * belongs wholly to the coherent spouse or is shared with them. Reporting
          * half would assert the eligibility this check has just called into
          * question.
+         *
+         * Except where the doubt cannot change the answer, which is why this reads
+         * the shares. A doubted spouse whose share is already 0 gets nothing on
+         * either reading: nothing because the couple agreed to allocate them
+         * nothing, and nothing because Q&A-31 would give the whole limitation to
+         * the other spouse. The other spouse holds the remaining 1 either way, for
+         * the same two reasons. Both branches agree on both shares, so there is
+         * nothing left for the doubt to make unknowable and nulling the pair would
+         * withhold a division the engine can state. Only an exactly-zero share
+         * qualifies: at 0.01 the two readings differ.
          *
          * The *amount* is untouched, and deliberately so: a self-only plan never
          * competes for the lowest family deductible, so the pool keeps reporting
@@ -13614,23 +13878,45 @@ final class Engine
         $divisionEligibilityDoubtPersons = [];
         if ($familySharingApplies) {
             foreach ($coupleMembersWithAccounts as $personId) {
-                if (array_key_exists($personId, $subminimumDeductibleByPerson)) {
+                if (
+                    array_key_exists($personId, $subminimumDeductibleByPerson)
+                    && ($shareByOwner[$personId] ?? null) !== 0.0
+                ) {
                     $divisionEligibilityDoubtPersons[] = $personId;
                 }
             }
         }
-        $householdDivisionUnknown = $householdDivisionIndeterminate
-            || count($divisionEligibilityDoubtPersons) > 0;
-        $familyPoolKey = $couple === null ? null : "{$couple[0]}|{$couple[1]}";
+        /*
+         * A division is only ever a fact about *something*. IRC 223(b)(5)(B)(ii)
+         * divides "the limitation under paragraph (1) ... after such reduction",
+         * and where that reduced limitation is zero every division of it is the
+         * same division: nought to each spouse, however they agreed or failed to
+         * agree. An unsettled share cannot move a result that no share can change,
+         * so it is not reported and it nulls nothing.
+         *
+         * This is the same principle as the exactly-zero-share case above, one
+         * level up: there the doubt could not move *these two* shares, here it
+         * cannot move *any* share. Both exist because an unknown that cannot change
+         * an answer is not an unknown worth withholding an answer for -- and the
+         * engine has previously withheld one, returning a null maximum for two
+         * spouses whose whole 8750 limitation had already been consumed by Archer
+         * MSA contributions under subparagraph (B)(i) and whose every possible
+         * division therefore yielded zero.
+         *
+         * null is not zero and does not qualify: an undeterminable amount is
+         * exactly the case where the engine cannot say the division is harmless.
+         */
+        $nothingLeftToDivide = $sharedFamilyLimit !== null && $sharedFamilyLimit <= 0;
+        $householdDivisionUnknown = !$nothingLeftToDivide
+            && ($householdDivisionIndeterminate || count($divisionEligibilityDoubtPersons) > 0);
+        /*
+         * Whether a settled division is worth announcing. Same test: where nothing
+         * is left to divide, saying how it was divided is noise about nought, and
+         * where the division did not settle the INFO would contradict the ERROR
+         * beside it.
+         */
+        $divisionIsReportable = !$householdDivisionUnknown && !$nothingLeftToDivide;
 
-        $explicitShareHolders = [];
-        foreach ($coupleMembersWithAccounts as $personId) {
-            if (array_key_exists('familyLimitShare', $facts[$personId]['rules'] ?? [])) {
-                $explicitShareHolders[] = $personId;
-            }
-        }
-        $shareByOwner = [];
-        $sharingDiagnostics = [];
         if ($familySharingApplies && $householdPoolAmountIndeterminate) {
             // IRC 223(b)(5)(A) gives the spouses one family limitation and (B)(ii)
             // divides it between them, so each share is a function of facts belonging
@@ -13662,13 +13948,19 @@ final class Engine
          */
         if ($familySharingApplies && $householdDivisionUnknown) {
             // Two causes, reported in different words because they call for
-            // different corrections: a share disagreement is fixed by stating one
-            // share, an impeached eligibility assertion by correcting the
-            // deductible or the tier.
-            $shareCause = 'A spouse\'s health savings accounts state different '
-                . 'planRules.hsa.familyLimitShare values, so the agreed division is not determinable '
-                . 'and no account\'s share of the limitation can be stated. '
-                . 'State one agreed share on every one of that spouse\'s health savings accounts.';
+            // different corrections: an unsettled division is fixed by settling
+            // it, an impeached eligibility assertion by correcting the deductible
+            // or the tier.
+            $unsettledCause = [
+                'unknown' => 'hsaFamilyLimitDivision reports that whether the spouses agreed a different '
+                    . 'division is not known',
+                'disputed' => 'hsaFamilyLimitDivision reports that the spouses state different divisions',
+                'inconsistent' => 'hsaFamilyLimitDivision reports that two records of the spouses\' division '
+                    . 'conflict',
+            ];
+            $shareCause = ($unsettledCause[$division['status'] ?? ''] ?? 'hsaFamilyLimitDivision is not settled')
+                . ', so no account\'s share of the limitation can be stated. Settle it as '
+                . '{ status: "statutory_equal" } or { status: "agreed", taxpayerShare }.';
             $eligibilityCause = implode(' and ', array_map(
                 static fn (string $personId): string => "Person {$personId}",
                 $divisionEligibilityDoubtPersons,
@@ -13685,95 +13977,61 @@ final class Engine
                 'IRC 223(b)(5)(B)(ii) divides the single family limitation between the spouses as they '
                     . 'agree. '
                     . ($householdDivisionIndeterminate ? $shareCause : $eligibilityCause)
-                    . ' The limitation itself is '
-                    . 'unaffected and the IRC 223(b)(5) shared limit still reports it: subparagraph (A) '
-                    . 'fixes that amount from coverage facts, which this does not touch.',
+                    // Only where the limitation really is still reported. Where the
+                    // couple's coverage facts left the amount itself undeterminable,
+                    // the IRC 223(b)(5) pool limit is null too, and this sentence
+                    // would contradict both HSA_SHARED_FAMILY_LIMIT_INDETERMINATE
+                    // beside it and the serialized pool.
+                    . ($householdPoolAmountIndeterminate
+                        ? ' The limitation being divided is separately undeterminable, so the IRC 223(b)(5) '
+                            . 'shared limit is not reported either; see HSA_SHARED_FAMILY_LIMIT_INDETERMINATE.'
+                        : ' The limitation itself is unaffected and the IRC 223(b)(5) shared limit still '
+                            . 'reports it: subparagraph (A) fixes that amount from coverage facts, which this '
+                            . 'does not touch.'),
                 'accounts',
                 'IRC 223(b)(5)(B)(ii)',
             );
         }
         if ($familySharingApplies) {
-            if ($explicitShareHolders !== []) {
-                if (count($explicitShareHolders) !== count($coupleMembersWithAccounts)) {
-                    $sharingDiagnostics[] = self::diagnostic(
-                        'HSA_FAMILY_LIMIT_SHARE_REQUIRED_FOR_BOTH_SPOUSES',
-                        DiagnosticSeverity::ERROR,
-                        'When one spouse supplies planRules.hsa.familyLimitShare, every spouse with a health savings '
-                            . 'account must supply one, so that the agreed division of the single IRC 223(b)(5) family '
-                            . 'limit is complete.',
-                        'accounts',
-                        'IRC 223(b)(5)(B)(ii)',
-                    );
-                }
-                $total = 0.0;
-                foreach ($coupleMembersWithAccounts as $personId) {
-                    $share = (float) ($facts[$personId]['rules']['familyLimitShare'] ?? 0);
-                    $shareByOwner[$personId] = $share;
-                    $total += $share;
-                }
-                if ($total > 1 + 1e-9) {
-                    $formatted = self::jsNumber($total);
-                    $sharingDiagnostics[] = self::diagnostic(
-                        'HSA_FAMILY_LIMIT_SHARES_EXCEED_ONE',
-                        DiagnosticSeverity::ERROR,
-                        "The supplied family-limit shares total {$formatted}. IRC 223(b)(5)(B)(ii) divides one family "
-                            . 'limit between the spouses, so the shares cannot exceed 1.',
-                        'accounts',
-                        'IRC 223(b)(5)(B)(ii)',
-                    );
-                }
-                /*
-                 * The other half of the same sentence. IRC 223(b)(5)(B)(ii) says the
-                 * limitation "shall be divided equally between them unless they agree on a
-                 * different division" — a division, not an allocation of part of it, so
-                 * shares that do not exhaust the limitation are as impossible as shares
-                 * that overrun it, and are reported at the same severity.
-                 *
-                 * Only when both spouses own an HSA and both supplied a share. An
-                 * incomplete supply is already HSA_FAMILY_LIMIT_SHARE_REQUIRED_FOR_BOTH_SPOUSES,
-                 * and where only one spouse owns an HSA the shares in hand cover one spouse,
-                 * so a share below 1 is a complete division whose remainder the other spouse
-                 * simply has no account to use.
-                 */
-                if (
-                    count($coupleMembersWithAccounts) > 1
-                    && count($explicitShareHolders) === count($coupleMembersWithAccounts)
-                    && $total < 1 - 1e-9
-                ) {
-                    $formatted = self::jsNumber($total);
-                    $sharingDiagnostics[] = self::diagnostic(
-                        'HSA_FAMILY_LIMIT_SHARES_BELOW_ONE',
-                        DiagnosticSeverity::ERROR,
-                        "The supplied family-limit shares total {$formatted}. IRC 223(b)(5)(B)(ii) divides one family "
-                            . 'limit between the spouses, so they must exhaust it: a total below 1 leaves part of the '
-                            . 'limitation allocated to neither spouse and would silently forfeit it.',
-                        'accounts',
-                        'IRC 223(b)(5)(B)(ii)',
-                    );
-                }
-            } elseif (count($coupleMembersWithAccounts) > 1) {
-                foreach ($coupleMembersWithAccounts as $personId) {
-                    $shareByOwner[$personId] = 1 / count($coupleMembersWithAccounts);
-                }
+            // Only where the division actually held. $defaultedDivision records
+            // that the engine settled it without being told; $householdDivisionUnknown
+            // says it did not settle after all, and announcing a default alongside
+            // a null share would contradict the same result twice over.
+            if ($defaultedDivision === 'sole_eligible_spouse' && $divisionIsReportable) {
+                $sharingDiagnostics[] = self::diagnostic(
+                    'HSA_SOLE_ELIGIBLE_SPOUSE_TAKES_WHOLE_FAMILY_LIMIT',
+                    DiagnosticSeverity::INFO,
+                    'The other spouse is stated to have held no high deductible health plan coverage in any month, '
+                        . 'so they are not an eligible individual and take no share of the family limit. Notice '
+                        . '2004-50 Q&A-31: "if only one spouse is an eligible individual, only that spouse may '
+                        . 'contribute to an HSA (notwithstanding the treatment under section 223(b)(5)(A) of both '
+                        . 'spouses as having only family coverage)", and Example (1) of that Q&A gives the whole '
+                        . 'limitation to the eligible spouse. This is not an equal division and is not an agreement; '
+                        . 'it is the consequence of the coverage facts supplied.',
+                    'accounts',
+                    'IRC 223(b)(5)(B)(ii); Notice 2004-50 Q&A-31',
+                );
+            } elseif ($defaultedDivision === 'equally_sole_account' && $divisionIsReportable) {
+                $sharingDiagnostics[] = self::diagnostic(
+                    'HSA_SOLE_SPOUSE_ACCOUNT_TAKES_ONLY_ITS_EQUAL_SHARE',
+                    DiagnosticSeverity::INFO,
+                    'Only one spouse has a health savings account, and no different division was agreed, so '
+                        . 'IRC 223(b)(5)(B)(ii) still divides the family limit equally between the spouses: this '
+                        . 'account takes half of it and the other half belongs to the spouse who has no account to '
+                        . 'use it. Owning the only HSA is not itself an agreement to a different division. If the '
+                        . 'spouses did agree to allocate the whole limit here, state it as hsaFamilyLimitDivision '
+                        . '{ status: "agreed", taxpayerShare } -- Notice 2004-50 Q&A-32 permits any division, '
+                        . '"including allocating nothing to one spouse".',
+                    'accounts',
+                    'IRC 223(b)(5)(B)(ii)',
+                );
+            } elseif ($defaultedDivision === 'equally' && $divisionIsReportable) {
                 $sharingDiagnostics[] = self::diagnostic(
                     'HSA_FAMILY_LIMIT_DIVIDED_EQUALLY_BY_DEFAULT',
                     DiagnosticSeverity::INFO,
                     'IRC 223(b)(5)(B)(ii) divides the single family contribution limit equally between the spouses '
-                        . 'unless they agree on a different division. Supply planRules.hsa.familyLimitShare on each '
-                        . 'spouse\'s HSA to record a different agreement.',
-                    'accounts',
-                    'IRC 223(b)(5)(B)(ii)',
-                );
-            } else {
-                foreach ($coupleMembersWithAccounts as $personId) {
-                    $shareByOwner[$personId] = 1.0;
-                }
-                $sharingDiagnostics[] = self::diagnostic(
-                    'HSA_SOLE_SPOUSE_ACCOUNT_ASSUMED_FULL_FAMILY_LIMIT',
-                    DiagnosticSeverity::INFO,
-                    'Only one spouse has a health savings account, so the whole IRC 223(b)(5) family limit is allocated '
-                        . 'to it. That is the division the spouses are assumed to have agreed on; the statutory default '
-                        . 'absent an agreement is an equal division.',
+                        . 'unless they agree on a different division. Supply hsaFamilyLimitDivision as '
+                        . '{ status: "agreed", taxpayerShare } on the scenario to record a different agreement.',
                     'accounts',
                     'IRC 223(b)(5)(B)(ii)',
                 );
@@ -13972,10 +14230,13 @@ final class Engine
                     'HSA_AGE_55_ADDITIONAL_CONTRIBUTION_IS_PER_SPOUSE',
                     DiagnosticSeverity::INFO,
                     'The IRC 223(b)(3) additional contribution amount belongs to the individual, is excluded from the '
-                        . 'IRC 223(b)(5) family division, and must be contributed to that spouse\'s own HSA. Two '
-                        . 'spouses aged 55 or older therefore have two of them.',
+                        . 'IRC 223(b)(5) family division, and must be contributed to that spouse\'s own HSA: Notice '
+                        . '2008-59 Q&A-22 answers that question "Yes", and holds that an individual eligible to make '
+                        . 'catch-up contributions "may only make such contributions to his or her own HSA". Two spouses '
+                        . 'aged 55 or older therefore have two of them, and an agreed division allocating nothing to one '
+                        . 'spouse still leaves that spouse their own.',
                     "persons.{$ownerId}",
-                    'IRC 223(b)(3); IRC 223(b)(5)(B)',
+                    'IRC 223(b)(3); IRC 223(b)(5)(B); Notice 2008-59 Q&A-22',
                 );
             }
 
@@ -13993,15 +14254,12 @@ final class Engine
                 ));
 
             if ($amounts['lastMonthRuleApplied'] && !$indeterminate) {
-                $rules = $facts[$ownerId]['rules'];
+                $lastMonthRule = $facts[$ownerId]['lastMonthRule'];
                 $testingMonths = $parameters['testingPeriodMonths'] ?? 13;
-                if (array_key_exists('testingPeriodSatisfied', $rules) && $rules['testingPeriodSatisfied'] === true) {
+                if (($lastMonthRule['testingPeriodSatisfied'] ?? null) === true) {
                     $testingStatus = 'satisfied';
-                } elseif (
-                    array_key_exists('testingPeriodSatisfied', $rules)
-                    && $rules['testingPeriodSatisfied'] === false
-                ) {
-                    $testingStatus = ($rules['testingPeriodFailureByDeathOrDisability'] ?? null) === true
+                } elseif (($lastMonthRule['testingPeriodSatisfied'] ?? null) === false) {
+                    $testingStatus = ($lastMonthRule['testingPeriodFailureByDeathOrDisability'] ?? null) === true
                         ? 'failed_exception_applies'
                         : 'failed';
                 } else {

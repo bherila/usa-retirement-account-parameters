@@ -152,6 +152,28 @@ cost-of-living notice, so they are cited and verified separately.
   publishes an annual amount the corpus does not already take from Notice 2004-2; they are held
   for the provenance of these rules.
 
+- **Notice 2004-50, Q&A-32 and Notice 2008-59, Q&A-22** — the two halves of the §223(b)(5)(B)(ii)
+  division, and the reason the division is one couple-level fact rather than a share on each
+  account.
+
+  Q&A-32 fixes the *breadth* of the agreement: "spouses can divide the annual HSA contribution
+  in any way they want, **including allocating nothing to one spouse**." So a share of 0 or 1 is
+  a complete division, not a defective one. That is what the account-level model could not
+  express — a share of 0 on one spouse's account was indistinguishable from a share that had
+  simply not been supplied — and it is why `hsaFamilyLimitDivision` states one taxpayer share on
+  the scenario and gives the spouse the remainder.
+
+  Q&A-22 fixes the *limit* of the agreement: asked whether spouses each eligible for the
+  §223(b)(3) catch-up must contribute it to their own HSA, it answers "Yes. An individual who is
+  eligible to make catch-up contributions may only make such contributions to his or her own
+  HSA." The catch-up is therefore not among the things a division can move, which agrees with
+  §223(b)(5)(B) dividing the limitation determined "without regard to any additional contribution
+  amount under paragraph (3)". A spouse allocated nothing of the family limitation still keeps
+  their own $1,000, and the engine keys the §223(b)(3) pool to the owner for that reason.
+
+  `evidence/hsa-limits/sources/n-08-59.pdf` is committed and hashed alongside `n-04-50.pdf`.
+  Neither publishes an annual amount; both are held for the provenance of these rules.
+
 - **Tax Relief and Health Care Act of 2006** — §303 removed the §223(b)(2) cap that limited
   the monthly contribution to 1/12 of the *lesser* of the plan's annual deductible and the
   dollar amount, and §305 added the §223(b)(8) last-month rule, both effective for taxable

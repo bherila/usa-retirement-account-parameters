@@ -142,12 +142,62 @@ function randomHsaRules() {
   // rules object and stayed unreachable enough that the split survived until a
   // lucky seed found it.
   if (chance(0.3)) rules.hdhpAnnualDeductible = pick([0, 1000, 1500, 2650, 3000, 5000, 5150, 10500, null]);
-  if (chance(0.3)) rules.useLastMonthRule = chance(0.05) ? junk() : chance(0.7);
-  if (chance(0.25)) rules.testingPeriodSatisfied = chance(0.5);
-  if (chance(0.15)) rules.testingPeriodFailureByDeathOrDisability = chance(0.5);
-  if (chance(0.25)) rules.familyLimitShare = pick([0, 0.25, 0.5, 0.75, 1, 0.6]);
-  if (chance(0.04)) rules[pick(["coverageTier", "eligibleMonths", "monthlyCoverage", "familyLimitShare", "hdhpAnnualDeductible"])] = junk();
+  // The four fields that moved off the account in 0.5.0. They are generated
+  // here on purpose and at a low rate: an account carrying one of them must be
+  // *rejected* with the same code by both engines, and a rejection path is as
+  // much a parity surface as a computed one. Removing them from the fuzzer
+  // would leave RELOCATED_HSA_ACCOUNT_FIELDS unexercised outside its vectors.
+  if (chance(0.06)) {
+    rules[pick([
+      "useLastMonthRule",
+      "testingPeriodSatisfied",
+      "testingPeriodFailureByDeathOrDisability",
+      "familyLimitShare",
+    ])] = chance(0.3) ? junk() : chance(0.5);
+  }
+  if (chance(0.04)) rules[pick(["coverageTier", "eligibleMonths", "monthlyCoverage", "hdhpAnnualDeductible"])] = junk();
   return rules;
+}
+
+/**
+ * IRC 223(b)(8) facts, which live on the person. `useLastMonthRule` without a
+ * December eligible month, and a testing-period fact without the election, are
+ * both generated: each is an input the engine has to decline to act on rather
+ * than a combination it can assume away.
+ */
+function randomHsaLastMonthRule() {
+  const rule = {};
+  if (chance(0.7)) rule.useLastMonthRule = chance(0.05) ? junk() : chance(0.7);
+  if (chance(0.45)) rule.testingPeriodSatisfied = chance(0.05) ? junk() : chance(0.5);
+  if (chance(0.25)) rule.testingPeriodFailureByDeathOrDisability = chance(0.05) ? junk() : chance(0.5);
+  return rule;
+}
+
+/**
+ * The IRC 223(b)(5)(B)(ii) division, which lives on the scenario. Every status
+ * is reachable, and so are the two rejection shapes -- an "agreed" without a
+ * share and a share beside a status that is not "agreed" -- because those are
+ * the input-contract errors the status union exists to raise.
+ */
+function randomHsaFamilyLimitDivision() {
+  const status = pick([
+    "statutory_equal",
+    "agreed",
+    "agreed",
+    "unknown",
+    "disputed",
+    "inconsistent",
+    "not_a_status",
+  ]);
+  const division = { status: chance(0.03) ? junk() : status };
+  if (status === "agreed") {
+    // Omitted and null are the two ways to state "agreed" without a share, and
+    // both must be rejected rather than defaulted to a taxpayer share of 0.
+    if (chance(0.85)) division.taxpayerShare = pick([0, 0.25, 0.5, 0.75, 1, 0.6, 1.5, -0.1, null, junk()]);
+  } else if (chance(0.12)) {
+    division.taxpayerShare = pick([0.5, 0.25]);
+  }
+  return division;
 }
 
 /**
@@ -306,8 +356,11 @@ function randomPerson(id, role, taxYear) {
   if (chance(0.3)) {
     person.qualifiedHsaFundingDistributions = chance(0.05) ? junk() : pick([0, 1, 900, 3400, 4400, 8750, 20000, money()]);
   }
+  // IRC 223(b)(8) is one election per person, so this is where it is stated.
+  if (chance(0.3)) person.hsaLastMonthRule = chance(0.04) ? junk() : randomHsaLastMonthRule();
   // Person-level IRC 223(c)(2) coverage. randomHsaRules() also emits the
-  // account-only keys, which both engines must ignore identically here.
+  // relocated keys, which persons[].hsaCoverage ignores rather than rejects --
+  // a difference between the two paths that both engines must reproduce.
   // Spouse coverage drives the IRC 223(b)(5)(A) family-sharing and
   // lowest-deductible rules even when that spouse owns no HSA, so it is
   // generated often and is allowed to be family-with-a-deductible, family
@@ -408,18 +461,19 @@ function randomScenario() {
       "tier",
       "monthly",
       "deductible_only",
-      "share_only",
       // A disagreement about *which months are covered at all* leaves the
       // family question answered the same way by both statements but changes
       // the undivided self-only portion that is added to the IRC 223(b)(5)
       // household ceiling.
       "eligible_months_only",
-      // Neither field is coverage, and only one of the two reaches the ceiling.
-      "last_month_rule",
-      "testing_period",
       // An account statement carrying no usable coverage fact, which must not
       // read as an assertion that the person had none.
       "empty_account",
+      // The 0.5.0 rejection path, reached through the same two-account shape
+      // that used to produce a share or election *conflict*. There is nothing
+      // left to conflict about -- the input is refused instead -- and both
+      // engines must refuse it with the same code from the same account index.
+      "relocated_field",
     ]);
     const sharedTier = pick(COVERAGE_TIERS);
     let pairRules;
@@ -437,31 +491,25 @@ function randomScenario() {
         { coverageTier: sharedTier, hdhpAnnualDeductible: money() },
         { coverageTier: sharedTier, hdhpAnnualDeductible: money() },
       ];
-    } else if (conflictShape === "share_only") {
-      pairRules = [
-        { coverageTier: sharedTier, familyLimitShare: 0.5 },
-        { coverageTier: sharedTier, familyLimitShare: chance(0.5) ? 0.5 : 0.25 },
-      ];
     } else if (conflictShape === "eligible_months_only") {
       pairRules = [
         { coverageTier: sharedTier, eligibleMonths: monthsFor() },
         { coverageTier: sharedTier, eligibleMonths: monthsFor() },
       ];
-    } else if (conflictShape === "last_month_rule") {
+    } else if (conflictShape === "relocated_field") {
       const shared = { coverageTier: sharedTier, eligibleMonths: [12] };
+      const relocated = pick([
+        "useLastMonthRule",
+        "testingPeriodSatisfied",
+        "testingPeriodFailureByDeathOrDisability",
+        "familyLimitShare",
+      ]);
       pairRules = [
-        { ...shared, useLastMonthRule: true, ...(chance(0.6) ? { testingPeriodSatisfied: chance(0.5) } : {}) },
-        { ...shared, useLastMonthRule: chance(0.75) ? false : true },
-      ];
-    } else if (conflictShape === "testing_period") {
-      const shared = { coverageTier: sharedTier, eligibleMonths: [12], useLastMonthRule: true };
-      pairRules = [
-        { ...shared, testingPeriodSatisfied: true },
-        {
-          ...shared,
-          ...(chance(0.75) ? { testingPeriodSatisfied: false } : {}),
-          ...(chance(0.3) ? { testingPeriodFailureByDeathOrDisability: true } : {}),
-        },
+        { ...shared, [relocated]: relocated === "familyLimitShare" ? 0.5 : true },
+        // Only one of the pair carries the removed field about half the time,
+        // so the rejection is compared both where the first account raises it
+        // and where the second does.
+        chance(0.5) ? { ...shared } : { ...shared, [relocated]: relocated === "familyLimitShare" ? 0.25 : false },
       ];
     } else if (conflictShape === "empty_account") {
       pairRules = [
@@ -721,6 +769,13 @@ function randomScenario() {
 
   const scenario = { taxYear, filingStatus, persons, accounts };
 
+  // The IRC 223(b)(5)(B)(ii) division. Generated more often on an HSA-heavy
+  // scenario, where it actually reaches a result, but not only there: on a
+  // scenario with no HSA it must be validated and then ignored, identically.
+  if (chance(hsaHeavy ? 0.5 : 0.08)) {
+    scenario.hsaFamilyLimitDivision = chance(0.04) ? junk() : randomHsaFamilyLimitDivision();
+  }
+
   if (chance(0.25)) {
     const conversions = [];
     for (let index = 0; index < integer(1, 2); index += 1) {
@@ -747,6 +802,7 @@ function randomScenario() {
   if (chance(0.02)) scenario.conversions = chance(0.5) ? [junk()] : junk();
   if (chance(0.02)) scenario.taxYear = junk();
   if (chance(0.02)) scenario.filingStatus = junk();
+  if (chance(0.02)) scenario.hsaFamilyLimitDivision = junk();
 
   return scenario;
 }

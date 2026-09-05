@@ -200,6 +200,13 @@ export interface PersonInput {
    */
   hsaCoverage?: HsaCoverageInput;
   /**
+   * IRC 223(b)(8) last-month-rule election and testing-period facts for this
+   * person. One election per person rather than one per account: IRC 223(b)(8)
+   * operates on "an individual", and an owner's two HSAs cannot make different
+   * elections.
+   */
+  hsaLastMonthRule?: HsaLastMonthRuleInput;
+  /**
    * The aggregate amount paid for the taxable year to Archer MSAs of this
    * person. IRC 223(b)(4)(A) reduces that person's IRC 223(b) limitation by it;
    * IRC 223(b)(5)(B)(i) reduces the single family limitation by both spouses'
@@ -321,19 +328,88 @@ export interface HsaCoverageInput {
 }
 
 /**
- * IRC 223 facts about one owner's HSA: that person's coverage, plus the
- * elections and agreements that belong to the account rather than the person.
+ * IRC 223 facts read from an HSA account's `planRules.hsa`.
+ *
+ * This is `HsaCoverageInput` and nothing more. It had carried four further
+ * fields, and none of them was about the account:
+ *
+ * - `familyLimitShare` is about the *couple*. IRC 223(b)(5)(B)(ii) divides the
+ *   one family limitation "equally between them unless they agree on a
+ *   different division", and "them" is the married individuals of the opening
+ *   clause. It now lives on `ScenarioInput.hsaFamilyLimitDivision`.
+ * - `useLastMonthRule`, `testingPeriodSatisfied` and
+ *   `testingPeriodFailureByDeathOrDisability` are about the *person*.
+ *   IRC 223(b)(8)(A) treats "an individual who is an eligible individual during
+ *   the last month of such taxable year" and (b)(8)(B) puts the income
+ *   inclusion on that individual; neither speaks to an account. They now live
+ *   on `PersonInput.hsaLastMonthRule`.
+ *
+ * The evidence that these were misplaced was in the engine itself: it carried
+ * two conflict detectors, computed identically on adjacent lines, whose only
+ * job was to notice that one owner's accounts disagreed about a fact that
+ * cannot vary between an owner's accounts. Both are gone.
+ *
+ * Multiple HSAs do not subdivide their owner's maximum -- Pub. 969 (2005) p. 5:
+ * "If you have more than one HSA in 2005, your total contributions to all the
+ * HSAs cannot be more than the limits discussed earlier" -- so an account was
+ * never the right level for any of this.
  */
-export interface HsaRulesInput extends HsaCoverageInput {
+export type HsaRulesInput = HsaCoverageInput;
+
+/**
+ * IRC 223(b)(8) last-month-rule facts about one *person*.
+ *
+ * IRC 223(b)(8)(A) makes the election for "an individual who is an eligible
+ * individual during the last month of such taxable year", and (b)(8)(B)(i)
+ * puts any resulting income inclusion in that individual's gross income. Both
+ * operate on the person, so an owner with two HSAs makes one election, not two.
+ */
+export interface HsaLastMonthRuleInput {
   /** Elect the IRC 223(b)(8) last-month rule. Requires eligibility in December. */
   useLastMonthRule?: boolean;
   /** Whether the IRC 223(b)(8)(B)(iii) testing period was, or will be, satisfied. Omitted means unresolved. */
   testingPeriodSatisfied?: boolean;
   /** IRC 223(b)(8)(B)(ii): a testing-period failure caused by death or disability is excepted. */
   testingPeriodFailureByDeathOrDisability?: boolean;
-  /** IRC 223(b)(5)(B)(ii) agreed share of the one family limit, 0 through 1. */
-  familyLimitShare?: number;
 }
+
+/**
+ * How the one IRC 223(b)(5) family limitation is divided between the spouses.
+ *
+ * IRC 223(b)(5)(B)(ii): the limitation, after the (B)(i) reduction, "shall be
+ * divided equally between them unless they agree on a different division". The
+ * equal split is the rule and an agreement is the exception, which is why an
+ * omitted division means `statutory_equal` rather than an unknown: the
+ * Instructions for Form 8889 state the same default -- "divide the amount on
+ * line 5 equally between you and your spouse, unless you both agree on a
+ * different allocation".
+ *
+ * The non-numeric statuses exist because failing to establish the exception is
+ * not the same input state as establishing its absence. Records that contradict
+ * each other are equally consistent with "they agreed equally and one record is
+ * wrong" and "they agreed 25/75 and the other is wrong"; defaulting those to
+ * 50/50 would overstate one spouse's limitation in the second case. An
+ * adjudicator might reach the equal split as an evidentiary finding against a
+ * taxpayer who cannot substantiate a claimed unequal division, but a parameter
+ * engine must not perform that adjudication silently.
+ */
+export type HsaFamilyLimitDivisionInput =
+  /** No different division was agreed, so IRC 223(b)(5)(B)(ii) divides equally. */
+  | { status: "statutory_equal" }
+  /**
+   * The spouses agreed a different division. `taxpayerShare` is the share of
+   * the one family limitation belonging to the person whose `role` is
+   * `taxpayer`, from 0 through 1; the spouse takes the remainder. Notice
+   * 2004-50 Q&A-32 permits any division, "including allocating nothing to one
+   * spouse", so 0 and 1 are both valid.
+   */
+  | { status: "agreed"; taxpayerShare: number }
+  /** Whether a different division was agreed is not known. */
+  | { status: "unknown" }
+  /** The spouses report different divisions. */
+  | { status: "disputed" }
+  /** Two records of the same division conflict. */
+  | { status: "inconsistent" };
 
 /**
  * Rev. Rul. 2004-45 classification of a health FSA, which decides whether it is
@@ -694,6 +770,16 @@ export interface ScenarioInput {
    * on a married-separate return, the determination is reported as not made.
    */
   treatedAsUnmarriedUnderSection21e4?: boolean;
+  /**
+   * IRC 223(b)(5)(B)(ii) division of the one family limitation between the
+   * spouses. Omitted means `{ status: "statutory_equal" }` -- the statute
+   * divides equally unless the spouses agree otherwise, so silence is the
+   * default rule rather than a missing fact.
+   *
+   * Read only where IRC 223(b)(5) applies: a married couple at least one of
+   * whom has family coverage. Ignored otherwise.
+   */
+  hsaFamilyLimitDivision?: HsaFamilyLimitDivisionInput;
 }
 
 export interface ContributionComponents {
@@ -9186,6 +9272,8 @@ interface CalculationContext {
   filingStatus: FilingStatus;
   /** The IRC 21(e)(4) determination, or null when it was not supplied. */
   treatedAsUnmarriedUnderSection21e4: boolean | null;
+  /** IRC 223(b)(5)(B)(ii) division, defaulted to the statutory equal split. */
+  hsaFamilyLimitDivision: HsaFamilyLimitDivisionInput;
   parameters: YearParameters;
   hsaParameters: HsaYearParameters | null;
   fsaParameters: FsaYearParameters | null;
@@ -9298,6 +9386,10 @@ function normalizePersons(personsInput: PersonInput[]): Map<string, NormalizedPe
     requireInputObject(input.hsaCoverage, `persons[${index}].hsaCoverage`);
     if (input.hsaCoverage !== undefined) {
       validateHsaCoverage(input.hsaCoverage, `persons[${index}].hsaCoverage`);
+    }
+    requireInputObject(input.hsaLastMonthRule, `persons[${index}].hsaLastMonthRule`);
+    if (input.hsaLastMonthRule !== undefined) {
+      validateHsaLastMonthRule(input.hsaLastMonthRule, `persons[${index}].hsaLastMonthRule`);
     }
     booleanFlag(input.coveredByEmployerRetirementPlan, `persons[${index}].coveredByEmployerRetirementPlan`);
     booleanFlag(input.livedWithSpouseDuringYear, `persons[${index}].livedWithSpouseDuringYear`);
@@ -9555,16 +9647,93 @@ function validateHsaCoverage(rules: HsaCoverageInput, path: string): void {
   money(rules.hdhpAnnualDeductible, `${path}.hdhpAnnualDeductible`);
 }
 
+/**
+ * Fields that used to live on an account's `planRules.hsa` and now live on the
+ * person or the scenario. They are rejected rather than normalised: silently
+ * reading a moved field would let one owner's two accounts go on disagreeing
+ * about a fact that cannot vary between them, which is the state this move
+ * exists to make unrepresentable.
+ */
+const RELOCATED_HSA_ACCOUNT_FIELDS: ReadonlyArray<[string, string, string]> = [
+  [
+    "familyLimitShare",
+    "HSA_ACCOUNT_LEVEL_FAMILY_LIMIT_SHARE_REMOVED",
+    'IRC 223(b)(5)(B)(ii) divides the one family limitation between the spouses, not between accounts. Supply `hsaFamilyLimitDivision` on the scenario as { status: "agreed", taxpayerShare } instead.',
+  ],
+  [
+    "useLastMonthRule",
+    "HSA_ACCOUNT_LEVEL_LAST_MONTH_RULE_REMOVED",
+    "IRC 223(b)(8) applies to an individual, not to an account. Supply `persons[].hsaLastMonthRule.useLastMonthRule` instead.",
+  ],
+  [
+    "testingPeriodSatisfied",
+    "HSA_ACCOUNT_LEVEL_LAST_MONTH_RULE_REMOVED",
+    "IRC 223(b)(8)(B)(iii) applies to an individual, not to an account. Supply `persons[].hsaLastMonthRule.testingPeriodSatisfied` instead.",
+  ],
+  [
+    "testingPeriodFailureByDeathOrDisability",
+    "HSA_ACCOUNT_LEVEL_LAST_MONTH_RULE_REMOVED",
+    "IRC 223(b)(8)(B)(ii) applies to an individual, not to an account. Supply `persons[].hsaLastMonthRule.testingPeriodFailureByDeathOrDisability` instead.",
+  ],
+];
+
 function validateHsaRules(rules: HsaRulesInput, path: string): void {
   validateHsaCoverage(rules, path);
+  for (const [field, code, guidance] of RELOCATED_HSA_ACCOUNT_FIELDS) {
+    if ((rules as Record<string, unknown>)[field] !== undefined) {
+      throw new ParameterError(code, `${path}.${field} was removed in 0.5.0. ${guidance}`);
+    }
+  }
+}
+
+function validateHsaLastMonthRule(rules: HsaLastMonthRuleInput, path: string): void {
   booleanFlag(rules.useLastMonthRule, `${path}.useLastMonthRule`);
   booleanFlag(rules.testingPeriodSatisfied, `${path}.testingPeriodSatisfied`);
   booleanFlag(
     rules.testingPeriodFailureByDeathOrDisability,
     `${path}.testingPeriodFailureByDeathOrDisability`,
   );
-  if (rules.familyLimitShare !== undefined) {
-    rate(rules.familyLimitShare, `${path}.familyLimitShare`);
+}
+
+const HSA_FAMILY_LIMIT_DIVISION_STATUSES = [
+  "statutory_equal",
+  "agreed",
+  "unknown",
+  "disputed",
+  "inconsistent",
+] as const;
+
+function validateHsaFamilyLimitDivision(division: unknown, path: string): void {
+  if (division === undefined || division === null) return;
+  if (typeof division !== "object") {
+    throw new ParameterError("INVALID_INPUT_OBJECT", `${path} must be an object.`);
+  }
+  const status = (division as { status?: unknown }).status;
+  if (typeof status !== "string" || !HSA_FAMILY_LIMIT_DIVISION_STATUSES.includes(status as never)) {
+    throw new ParameterError(
+      "INVALID_HSA_FAMILY_LIMIT_DIVISION_STATUS",
+      `${path}.status must be one of ${HSA_FAMILY_LIMIT_DIVISION_STATUSES.join(", ")}.`,
+    );
+  }
+  const share = (division as { taxpayerShare?: unknown }).taxpayerShare;
+  if (status === "agreed") {
+    // `null` is rejected alongside `undefined`: `rate` treats both as "absent"
+    // and returns its default, which would silently read a stated-but-empty
+    // share as a taxpayer share of 0.
+    if (share === undefined || share === null) {
+      throw new ParameterError(
+        "HSA_FAMILY_LIMIT_DIVISION_SHARE_REQUIRED",
+        `${path}.taxpayerShare is required when status is "agreed".`,
+      );
+    }
+    rate(share, `${path}.taxpayerShare`);
+  } else if (share !== undefined) {
+    // A share beside any other status would state an agreement and deny it in
+    // the same object; which half to believe is not something to guess at.
+    throw new ParameterError(
+      "HSA_FAMILY_LIMIT_DIVISION_SHARE_NOT_PERMITTED",
+      `${path}.taxpayerShare is permitted only when status is "agreed".`,
+    );
   }
 }
 
@@ -9836,6 +10005,7 @@ function createCalculationContext(
   taxYear: number,
   filingStatus: FilingStatus,
   treatedAsUnmarriedUnderSection21e4: boolean | null,
+  hsaFamilyLimitDivision: HsaFamilyLimitDivisionInput,
   parameters: YearParameters,
   hsaParameters: HsaYearParameters | null,
   fsaParameters: FsaYearParameters | null,
@@ -9847,6 +10017,7 @@ function createCalculationContext(
     taxYear,
     filingStatus,
     treatedAsUnmarriedUnderSection21e4,
+    hsaFamilyLimitDivision,
     parameters,
     hsaParameters,
     fsaParameters,
@@ -11423,8 +11594,12 @@ interface HsaOwnerFacts {
    * carry either field. Letting `persons[].hsaCoverage` vote here would read its
    * structural absence as a disagreement with an account that supplies one.
    */
-  familyLimitShareConflict: boolean;
-  useLastMonthRuleConflict: boolean;
+  /**
+   * IRC 223(b)(8) facts for this person. One election per person, so there is
+   * nothing here for the person's accounts to disagree about -- which is why
+   * the two conflict detectors that used to sit beside this field are gone.
+   */
+  lastMonthRule: HsaLastMonthRuleInput;
   months: Array<HsaCoverageTier | null> | null;
 }
 
@@ -11715,13 +11890,7 @@ function initializeHsaPools(context: CalculationContext, accounts: NormalizedAcc
       conflict,
       personConflict,
       coverageVariants,
-      /**
-       * `persons[].hsaCoverage` carries neither field, so it does not vote on
-       * either; only the person's own accounts can disagree about the IRC
-       * 223(b)(5)(B)(ii) division or the IRC 223(b)(8) election.
-       */
-      familyLimitShareConflict: !unanimousField(accountVariants.map((variant) => variant.familyLimitShare)),
-      useLastMonthRuleConflict: !unanimousField(accountVariants.map((variant) => variant.useLastMonthRule)),
+      lastMonthRule: context.persons.get(ownerId)?.hsaLastMonthRule ?? {},
       months: rules === null ? null : resolveHsaMonths(rules),
     });
   }
@@ -12066,7 +12235,6 @@ function initializeHsaPools(context: CalculationContext, accounts: NormalizedAcc
     diagnostics: Diagnostic[];
     indeterminate: boolean;
     familyPoolAmountIndeterminate: boolean;
-    familyDivisionIndeterminate: boolean;
   }
 
   const amountsByOwner = new Map<string, HsaOwnerAmounts>();
@@ -12081,38 +12249,38 @@ function initializeHsaPools(context: CalculationContext, accounts: NormalizedAcc
      * usually leaves the other answered:
      *
      *   (A) gives the spouses one family limitation. Whether *that amount* is
-     *       knowable is `familyPoolAmountIndeterminate`.
+     *       knowable is `familyPoolAmountIndeterminate`, and it is a per-owner
+     *       question because it is built from each spouse's coverage facts.
      *   (B)(ii) divides that one limitation between them, equally unless they
      *       agree otherwise. Whether *the division* is knowable is
-     *       `familyDivisionIndeterminate`.
+     *       `householdDivisionIndeterminate`, below, and it is not a per-owner
+     *       question at all: the division is one statement about the couple, so
+     *       there is no owner to attribute it to. This is what moving the
+     *       division off the account bought -- the flag that used to sit beside
+     *       `familyPoolAmountIndeterminate` here could only ever be set by two
+     *       of one owner's accounts contradicting each other about a fact that
+     *       was never theirs to state.
      *
-     * They were one flag until the two were separated, which nulled a perfectly
-     * knowable couple-wide ceiling whenever the spouses' agreed shares
-     * contradicted each other -- an amount the statute fixes from coverage
-     * facts alone, withheld because of a disagreement about who may use it.
-     *
-     * Both are narrower questions than whether this owner's overall result is
-     * determinable. A missing birth year makes only the IRC 223(b)(3) age-55
+     * The amount question is narrower than whether this owner's overall result
+     * is determinable. A missing birth year makes only the IRC 223(b)(3) age-55
      * amount unknown and leaves the IRC 223(b)(5) family limit perfectly
-     * knowable, so it deliberately sets neither. Neither does the bare fact
+     * knowable, so it deliberately does not set it. Neither does the bare fact
      * that this person's coverage statements disagree: see
      * `familyOperandConflict` below, which asks which operand they disagree
      * about.
      */
     let familyPoolAmountIndeterminate = false;
-    let familyDivisionIndeterminate = false;
 
     /**
      * Does this owner's disagreement actually reach the couple's IRC 223(b)(5)
      * ceiling? That ceiling is the divided family limitation *plus* the
      * spouses' undivided self-only portions, so the question is which inputs
-     * can change `familyPortionApplied` or `selfPortionApplied` or the
-     * division. `HsaRulesInput` is a closed surface of eight fields, so the
-     * answer is enumerable rather than guessable -- an earlier attempt listed
-     * only the operands of the divided family amount and let a self-only month,
-     * a self-only deductible and the IRC 223(b)(8) election through, each of
-     * which then fixed the ceiling from whichever account happened to be listed
-     * first:
+     * can change `familyPortionApplied` or `selfPortionApplied`. `HsaRulesInput`
+     * is a closed surface of four fields, so the answer is enumerable rather
+     * than guessable -- an earlier attempt listed only the operands of the
+     * divided family amount and let a self-only month and a self-only deductible
+     * through, each of which then fixed the ceiling from whichever account
+     * happened to be listed first:
      *
      *   coverageTier, eligibleMonths, monthlyCoverage  reach it: tier and
      *       months of both portions.
@@ -12121,19 +12289,14 @@ function initializeHsaPools(context: CalculationContext, accounts: NormalizedAcc
      *       223(b)(5)(A) lowest-deductible comparison, and self-only months
      *       through the undivided self portion, which is why no family month is
      *       required for it to matter.
-     *   useLastMonthRule  reaches it: IRC 223(b)(8) replaces the prorated
-     *       amount with December's annualized one.
-     *   familyLimitShare  reaches the division and nothing else. IRC
-     *       223(b)(5)(B)(ii) divides a limitation subparagraph (A) has already
-     *       fixed, so a disagreement about the shares cannot move the amount
-     *       being shared -- which is why it is the one field here that sets the
-     *       division flag rather than the amount one.
-     *   testingPeriodSatisfied, testingPeriodFailureByDeathOrDisability  do
-     *       not. They are read only into the reported testing-period
-     *       obligation, never into either portion, so a disagreement about a
-     *       future compliance fact leaves this year's ceiling knowable.
      *
-     * A ninth field must be classified here rather than defaulting to inert.
+     * A fifth field must be classified here rather than defaulting to inert.
+     *
+     * The IRC 223(b)(8) election is no longer among them, and its absence is not
+     * an oversight: it does reach the ceiling, but it is one election per person
+     * under IRC 223(b)(8)(A), so an owner's accounts have nothing left to
+     * disagree about. Same for the testing-period facts, which never reached
+     * either portion in the first place.
      */
     const ownerSlots = coverageSlotsByPerson.get(ownerId);
     const deductibleUnanimous = unanimousField(
@@ -12144,10 +12307,8 @@ function initializeHsaPools(context: CalculationContext, accounts: NormalizedAcc
       ownerSlots.some((slot) => slot === "unknown") ||
       (parameters.contributionLimitCappedByHdhpAnnualDeductible &&
         !deductibleUnanimous &&
-        ownerSlots.some((slot) => slot !== "none")) ||
-      owner.useLastMonthRuleConflict;
+        ownerSlots.some((slot) => slot !== "none"));
     if (amountInputsIndeterminate) familyPoolAmountIndeterminate = true;
-    if (owner.familyLimitShareConflict) familyDivisionIndeterminate = true;
 
     if (owner.conflict) {
       indeterminate = true;
@@ -12457,7 +12618,7 @@ function initializeHsaPools(context: CalculationContext, accounts: NormalizedAcc
     let selfPortionApplied = selfPortionWithoutLastMonthRule;
     let catchUpApplied = catchUpWithoutLastMonthRule;
 
-    if (owner.rules?.useLastMonthRule) {
+    if (owner.lastMonthRule.useLastMonthRule) {
       const decemberTier = months[HSA_MONTHS_IN_YEAR - 1];
       if (!parameters.lastMonthRuleAvailable) {
         diagnostics.push(
@@ -12538,7 +12699,6 @@ function initializeHsaPools(context: CalculationContext, accounts: NormalizedAcc
       diagnostics,
       indeterminate,
       familyPoolAmountIndeterminate,
-      familyDivisionIndeterminate,
     });
   }
 
@@ -12591,15 +12751,19 @@ function initializeHsaPools(context: CalculationContext, accounts: NormalizedAcc
   );
   /**
    * The other question, asked separately. IRC 223(b)(5)(B)(ii) divides one
-   * limitation between the spouses, so a spouse whose own accounts state
-   * contradictory shares makes *the division* undeterminable while leaving the
-   * amount being divided exactly as computable as it was: subparagraph (A)
-   * fixes that amount from coverage facts, which a disagreement about shares
-   * does not touch.
+   * limitation between the spouses, so a couple whose stated division is itself
+   * unsettled leaves *the division* undeterminable while the amount being
+   * divided stays exactly as computable as it was: subparagraph (A) fixes that
+   * amount from coverage facts, which an unsettled division does not touch.
+   *
+   * `unknown`, `disputed` and `inconsistent` are the three ways the caller can
+   * say it is unsettled; `statutory_equal` and `agreed` both settle it.
    */
-  const householdDivisionIndeterminate = coupleMembersWithAccounts.some(
-    (personId) => amountsByOwner.get(personId)?.familyDivisionIndeterminate === true,
-  );
+  const divisionUnsettled =
+    context.hsaFamilyLimitDivision.status === "unknown" ||
+    context.hsaFamilyLimitDivision.status === "disputed" ||
+    context.hsaFamilyLimitDivision.status === "inconsistent";
+  const householdDivisionIndeterminate = divisionUnsettled;
   /**
    * A second reason the division can be unknown, and it is not a disagreement
    * about shares. IRC 223(b)(5)(B)(ii) divides the limitation between the
@@ -12630,18 +12794,206 @@ function initializeHsaPools(context: CalculationContext, accounts: NormalizedAcc
    * the account owner, as the self-only-spouse vectors already pin -- so there
    * is no division for their contradiction to make unknowable.
    */
-  const divisionEligibilityDoubtPersons = familySharingApplies
-    ? coupleMembersWithAccounts.filter((personId) => subminimumDeductibleByPerson.has(personId))
-    : [];
-  const householdDivisionUnknown =
-    householdDivisionIndeterminate || divisionEligibilityDoubtPersons.length > 0;
   const familyPoolKey = couple ? `${couple[0]}|${couple[1]}` : null;
 
-  const explicitShareHolders = coupleMembersWithAccounts.filter(
-    (personId) => facts.get(personId)?.rules?.familyLimitShare !== undefined,
-  );
+  /**
+   * The IRC 223(b)(5)(B)(ii) division, taken from the one place it can be
+   * stated. Omitted means `statutory_equal`: the statute divides equally
+   * "unless they agree on a different division", so silence is the default rule
+   * rather than a missing fact, and the Instructions for Form 8889 say the same
+   * -- "divide the amount on line 5 equally between you and your spouse, unless
+   * you both agree on a different allocation".
+   *
+   * The three non-numeric statuses are why this is a status rather than a
+   * nullable number. Failing to establish the agreement is not the same input
+   * state as establishing its absence: contradictory records are equally
+   * consistent with "they agreed equally and one is wrong" and "they agreed
+   * 25/75 and the other is wrong", and defaulting those to an equal split would
+   * overstate one spouse's limitation in the second case.
+   */
+  const division: HsaFamilyLimitDivisionInput =
+    context.hsaFamilyLimitDivision;
   const shareByOwner = new Map<string, number>();
   const sharingDiagnostics: Diagnostic[] = [];
+  /**
+   * Which branch of the division applied. The two INFO branches announce a
+   * division the engine settled on the caller's behalf, so they must not be
+   * emitted where the division turns out to be unknown -- an account cannot be
+   * told both that the limit was divided equally by default and that the
+   * division is indeterminate with a null share. Whether it is unknown is not
+   * decided until `divisionEligibilityDoubtPersons` below, which reads the
+   * shares, so the branch is recorded here and reported afterwards.
+   */
+  let defaultedDivision: "equally" | "equally_sole_account" | "sole_eligible_spouse" | null = null;
+  if (familySharingApplies) {
+    /**
+     * One number, not one per account: a share is a share of the couple's
+     * single limitation, so the other spouse takes the remainder. That deletes
+     * three diagnostics the account-level model needed -- a share supplied by
+     * only one spouse, shares totalling more than one, and shares totalling
+     * less -- because none of those states can be expressed any more.
+     *
+     * Where only one spouse owns an HSA the statutory division still gives them
+     * half; the other half is their spouse's and goes unused for want of an
+     * account. Only an agreement moves it, which is the point of
+     * `HSA_SOLE_SPOUSE_ACCOUNT_TAKES_ONLY_ITS_EQUAL_SHARE`.
+     */
+    const taxpayerId = coupleMembersWithAccounts.find(
+      (personId) => context.persons.get(personId)?.role === "taxpayer",
+    );
+    if (division.status === "agreed") {
+      // Notice 2004-50 Q&A-32 lets the spouses divide "in any way they want,
+      // including allocating nothing to one spouse", so an agreed share binds
+      // whether or not the other spouse owns an HSA. A sole owner who agreed to
+      // less than the whole limitation keeps that agreement; the remainder is
+      // the other spouse's to use or not, and is not forfeited to this account.
+      for (const personId of coupleMembersWithAccounts) {
+        shareByOwner.set(
+          personId,
+          personId === taxpayerId ? division.taxpayerShare : 1 - division.taxpayerShare,
+        );
+      }
+    } else if (division.status === "statutory_equal") {
+      /**
+       * Divided between *the spouses*, not between the spouses who happen to
+       * own an HSA. IRC 223(b)(5)(B)(ii) divides the limitation "equally between
+       * them", and "them" is "individuals who are married to each other" from
+       * the opening clause of paragraph (5) -- a phrase about a marriage, not
+       * about a pair of accounts. Owning an HSA is not a condition of being an
+       * eligible individual under IRC 223(c)(1), so a spouse with family
+       * coverage and no account still holds their half; they simply have
+       * nowhere to put it.
+       *
+       * So the divisor is the size of the couple, not the number of accounts.
+       * A sole owner takes 4375 of an 8750 limitation under the statutory
+       * division, and reaches the whole 8750 only through an agreement, which
+       * Notice 2004-50 Q&A-32 expressly lets the spouses make -- "including
+       * allocating nothing to one spouse". Reading ownership as that agreement
+       * would make the agreement mechanism unnecessary in the one case it is
+       * most often needed, and would contradict a caller who has just said in
+       * so many words that no different division was agreed.
+       */
+      /**
+       * Between spouses who are *eligible individuals*, which is neither the
+       * whole couple nor the account owners. Notice 2004-50 Q&A-31 puts the
+       * qualification in so many words -- "if only one spouse is an eligible
+       * individual, only that spouse may contribute to an HSA (notwithstanding
+       * the treatment under section 223(b)(5)(A) of both spouses as having only
+       * family coverage)" -- and its Example (1) gives H the whole 5000 because
+       * W's plan is not a high deductible health plan. The "notwithstanding" is
+       * the load-bearing word: subparagraph (A) deems both spouses to have
+       * family coverage, and that deeming does not make an ineligible spouse
+       * eligible for this purpose.
+       *
+       * Only a spouse the caller has positively placed outside eligibility is
+       * excluded: `hsaCoverage: {}` records that this person held no high
+       * deductible health plan coverage in any month, so every resolved slot is
+       * "none" and there is no month in which they could be an eligible
+       * individual. A spouse who stated nothing at all has no slots and is not
+       * excluded -- absence of a statement is not a statement of absence, and
+       * subparagraph (A) deems them covered -- and neither is a spouse eligible
+       * in even one month, who holds a share of their own.
+       *
+       * A spouse whose stated eligibility is *contradicted* rather than denied
+       * is a third case and is not decided here: that is the impeached-assertion
+       * path, which leaves the division indeterminate rather than resolving it
+       * either way.
+       */
+      const eligibleSpouses = (couple ?? coupleMembersWithAccounts).filter((personId) => {
+        const slots = coverageSlotsByPerson.get(personId);
+        return slots === undefined || slots.some((slot) => slot !== "none");
+      });
+      const spouses = Math.max(eligibleSpouses.length, 1);
+      for (const personId of coupleMembersWithAccounts) {
+        // An ineligible spouse who nonetheless owns an HSA takes no share of the
+        // couple's limitation; Q&A-31 lets only the eligible spouse contribute.
+        shareByOwner.set(personId, eligibleSpouses.includes(personId) ? 1 / spouses : 0);
+      }
+      defaultedDivision = eligibleSpouses.length < 2
+        ? "sole_eligible_spouse"
+        : spouses > coupleMembersWithAccounts.length
+          ? "equally_sole_account"
+          : "equally";
+    }
+  }
+
+  /**
+   * A second reason the division can be unknown, and it is not the couple's own
+   * statement of it. IRC 223(b)(5)(B)(ii) divides the limitation between the
+   * spouses, but Notice 2004-50 Q&A-31 is explicit that the division
+   * presupposes two eligible individuals: "if only one spouse is an eligible
+   * individual, only that spouse may contribute to an HSA (notwithstanding the
+   * treatment under section 223(b)(5)(A) of both spouses as having only family
+   * coverage)". Example (1) of that Q&A works it -- H contributes the whole
+   * 5000 while W, whose plan is not a high deductible health plan, contributes
+   * nothing.
+   *
+   * Ordinarily the caller's month list *is* the eligibility assertion and the
+   * division follows from it, which is why this engine can divide without
+   * testing IRC 223(c)(1). A subminimum deductible is precisely the case where
+   * that assertion is contradicted by another fact from the same caller, so the
+   * engine cannot tell whether the couple's limitation belongs wholly to the
+   * coherent spouse or is shared with them. Reporting half would assert the
+   * eligibility this check has just called into question.
+   *
+   * Except where the doubt cannot change the answer, which is why this reads
+   * the shares. A doubted spouse whose share is already 0 gets nothing on
+   * either reading: nothing because the couple agreed to allocate them nothing,
+   * and nothing because Q&A-31 would give the whole limitation to the other
+   * spouse. The other spouse holds the remaining 1 either way, for the same two
+   * reasons. Both branches agree on both shares, so there is nothing left for
+   * the doubt to make unknowable and nulling the pair would withhold a division
+   * the engine can state. Only an exactly-zero share qualifies: at 0.01 the two
+   * readings differ.
+   *
+   * The *amount* is untouched, and deliberately so: a self-only plan never
+   * competes for the lowest family deductible, so the pool keeps reporting its
+   * number while the division above it goes unstated. Any tier counts here,
+   * unlike the amount test, because eligibility is what is in doubt and a
+   * self-only contradiction impeaches it just as well.
+   *
+   * Only spouses who own a health savings account are asked about. A spouse
+   * without one receives no share in this model -- the limitation goes whole to
+   * the account owner, as the self-only-spouse vectors already pin -- so there
+   * is no division for their contradiction to make unknowable.
+   */
+  const divisionEligibilityDoubtPersons = familySharingApplies
+    ? coupleMembersWithAccounts.filter(
+        (personId) =>
+          subminimumDeductibleByPerson.has(personId) && shareByOwner.get(personId) !== 0,
+      )
+    : [];
+  /**
+   * A division is only ever a fact about *something*. IRC 223(b)(5)(B)(ii)
+   * divides "the limitation under paragraph (1) ... after such reduction", and
+   * where that reduced limitation is zero every division of it is the same
+   * division: nought to each spouse, however they agreed or failed to agree.
+   * An unsettled share cannot move a result that no share can change, so it is
+   * not reported and it nulls nothing.
+   *
+   * This is the same principle as the exactly-zero-share case above, one level
+   * up: there the doubt could not move *these two* shares, here it cannot move
+   * *any* share. Both exist because an unknown that cannot change an answer is
+   * not an unknown worth withholding an answer for -- and the engine has
+   * previously withheld one, returning a null maximum for two spouses whose
+   * whole 8750 limitation had already been consumed by Archer MSA
+   * contributions under subparagraph (B)(i) and whose every possible division
+   * therefore yielded zero.
+   *
+   * `null` is not zero and does not qualify: an undeterminable amount is
+   * exactly the case where the engine cannot say the division is harmless.
+   */
+  const nothingLeftToDivide = sharedFamilyLimit !== null && sharedFamilyLimit <= 0;
+  const householdDivisionUnknown =
+    !nothingLeftToDivide &&
+    (householdDivisionIndeterminate || divisionEligibilityDoubtPersons.length > 0);
+  /**
+   * Whether a settled division is worth announcing. Same test: where nothing is
+   * left to divide, saying how it was divided is noise about nought, and where
+   * the division did not settle the INFO would contradict the ERROR beside it.
+   */
+  const divisionIsReportable = !householdDivisionUnknown && !nothingLeftToDivide;
+
   if (familySharingApplies && householdPoolAmountIndeterminate) {
     // IRC 223(b)(5)(A) gives the spouses one family limitation and (B)(ii)
     // divides it between them, so each share is a function of facts belonging to
@@ -12670,10 +13022,16 @@ function initializeHsaPools(context: CalculationContext, accounts: NormalizedAcc
    */
   if (familySharingApplies && householdDivisionUnknown) {
     // Two causes, reported in different words because they call for different
-    // corrections: a share disagreement is fixed by stating one share, an
-    // impeached eligibility assertion by correcting the deductible or the tier.
-    const shareCause =
-      "A spouse's health savings accounts state different planRules.hsa.familyLimitShare values, so the agreed division is not determinable and no account's share of the limitation can be stated. State one agreed share on every one of that spouse's health savings accounts.";
+    // corrections: an unsettled division is fixed by settling it, an impeached
+    // eligibility assertion by correcting the deductible or the tier.
+    const unsettledCause: Record<string, string> = {
+      unknown: "hsaFamilyLimitDivision reports that whether the spouses agreed a different division is not known",
+      disputed: "hsaFamilyLimitDivision reports that the spouses state different divisions",
+      inconsistent: "hsaFamilyLimitDivision reports that two records of the spouses' division conflict",
+    };
+    const shareCause = `${
+      unsettledCause[context.hsaFamilyLimitDivision.status] ?? "hsaFamilyLimitDivision is not settled"
+    }, so no account's share of the limitation can be stated. Settle it as { status: "statutory_equal" } or { status: "agreed", taxpayerShare }.`;
     const eligibilityCause = `${divisionEligibilityDoubtPersons
       .map((personId) => `Person ${personId}`)
       .join(" and ")} stated an annual deductible below the IRC 223(c)(2)(A)(i) minimum for coverage they are also stated to hold, and Notice 2004-50 Q&A-31 divides the limitation only between spouses who are each an eligible individual: "if only one spouse is an eligible individual, only that spouse may contribute to an HSA". The month list supplied for that person asserts eligibility their own deductible contradicts, so the engine cannot tell whether this limitation belongs wholly to the other spouse, as in Example (1) of that Q&A, or is divided. Correct the deductible or the coverage tier.`;
@@ -12683,90 +13041,52 @@ function initializeHsaPools(context: CalculationContext, accounts: NormalizedAcc
         DiagnosticSeverity.ERROR,
         `IRC 223(b)(5)(B)(ii) divides the single family limitation between the spouses as they agree. ${
           householdDivisionIndeterminate ? shareCause : eligibilityCause
-        } The limitation itself is unaffected and the IRC 223(b)(5) shared limit still reports it: subparagraph (A) fixes that amount from coverage facts, which this does not touch.`,
+        }${
+          // Only where the limitation really is still reported. Where the
+          // couple's coverage facts left the amount itself undeterminable, the
+          // IRC 223(b)(5) pool limit is null too, and this sentence would
+          // contradict both HSA_SHARED_FAMILY_LIMIT_INDETERMINATE beside it and
+          // the serialized pool.
+          householdPoolAmountIndeterminate
+            ? " The limitation being divided is separately undeterminable, so the IRC 223(b)(5) shared limit is not reported either; see HSA_SHARED_FAMILY_LIMIT_INDETERMINATE."
+            : " The limitation itself is unaffected and the IRC 223(b)(5) shared limit still reports it: subparagraph (A) fixes that amount from coverage facts, which this does not touch."
+        }`,
         "accounts",
         "IRC 223(b)(5)(B)(ii)",
       ),
     );
   }
   if (familySharingApplies) {
-    if (explicitShareHolders.length > 0) {
-      if (explicitShareHolders.length !== coupleMembersWithAccounts.length) {
-        sharingDiagnostics.push(
-          diagnostic(
-            "HSA_FAMILY_LIMIT_SHARE_REQUIRED_FOR_BOTH_SPOUSES",
-            DiagnosticSeverity.ERROR,
-            "When one spouse supplies planRules.hsa.familyLimitShare, every spouse with a health savings account must supply one, so that the agreed division of the single IRC 223(b)(5) family limit is complete.",
-            "accounts",
-            "IRC 223(b)(5)(B)(ii)",
-          ),
-        );
-      }
-      let total = 0;
-      for (const personId of coupleMembersWithAccounts) {
-        const share = facts.get(personId)?.rules?.familyLimitShare ?? 0;
-        shareByOwner.set(personId, share);
-        total += share;
-      }
-      if (total > 1 + 1e-9) {
-        sharingDiagnostics.push(
-          diagnostic(
-            "HSA_FAMILY_LIMIT_SHARES_EXCEED_ONE",
-            DiagnosticSeverity.ERROR,
-            `The supplied family-limit shares total ${total}. IRC 223(b)(5)(B)(ii) divides one family limit between the spouses, so the shares cannot exceed 1.`,
-            "accounts",
-            "IRC 223(b)(5)(B)(ii)",
-          ),
-        );
-      }
-      /**
-       * The other half of the same sentence. IRC 223(b)(5)(B)(ii) says the
-       * limitation "shall be divided equally between them unless they agree on
-       * a different division" — a division, not an allocation of part of it, so
-       * shares that do not exhaust the limitation are as impossible as shares
-       * that overrun it, and are reported at the same severity.
-       *
-       * Only when both spouses own an HSA and both supplied a share. An
-       * incomplete supply is already HSA_FAMILY_LIMIT_SHARE_REQUIRED_FOR_BOTH_SPOUSES,
-       * and where only one spouse owns an HSA the shares in hand cover one
-       * spouse, so a share below 1 is a complete division whose remainder the
-       * other spouse simply has no account to use.
-       */
-      if (
-        coupleMembersWithAccounts.length > 1
-        && explicitShareHolders.length === coupleMembersWithAccounts.length
-        && total < 1 - 1e-9
-      ) {
-        sharingDiagnostics.push(
-          diagnostic(
-            "HSA_FAMILY_LIMIT_SHARES_BELOW_ONE",
-            DiagnosticSeverity.ERROR,
-            `The supplied family-limit shares total ${total}. IRC 223(b)(5)(B)(ii) divides one family limit between the spouses, so they must exhaust it: a total below 1 leaves part of the limitation allocated to neither spouse and would silently forfeit it.`,
-            "accounts",
-            "IRC 223(b)(5)(B)(ii)",
-          ),
-        );
-      }
-    } else if (coupleMembersWithAccounts.length > 1) {
-      for (const personId of coupleMembersWithAccounts) {
-        shareByOwner.set(personId, 1 / coupleMembersWithAccounts.length);
-      }
+    // Only where the division actually held. `defaultedDivision` records that
+    // the engine settled it without being told; `householdDivisionUnknown` says
+    // it did not settle after all, and announcing a default alongside a null
+    // share would contradict the same result twice over.
+    if (defaultedDivision === "sole_eligible_spouse" && divisionIsReportable) {
       sharingDiagnostics.push(
         diagnostic(
-          "HSA_FAMILY_LIMIT_DIVIDED_EQUALLY_BY_DEFAULT",
+          "HSA_SOLE_ELIGIBLE_SPOUSE_TAKES_WHOLE_FAMILY_LIMIT",
           DiagnosticSeverity.INFO,
-          "IRC 223(b)(5)(B)(ii) divides the single family contribution limit equally between the spouses unless they agree on a different division. Supply planRules.hsa.familyLimitShare on each spouse's HSA to record a different agreement.",
+          'The other spouse is stated to have held no high deductible health plan coverage in any month, so they are not an eligible individual and take no share of the family limit. Notice 2004-50 Q&A-31: "if only one spouse is an eligible individual, only that spouse may contribute to an HSA (notwithstanding the treatment under section 223(b)(5)(A) of both spouses as having only family coverage)", and Example (1) of that Q&A gives the whole limitation to the eligible spouse. This is not an equal division and is not an agreement; it is the consequence of the coverage facts supplied.',
+          "accounts",
+          "IRC 223(b)(5)(B)(ii); Notice 2004-50 Q&A-31",
+        ),
+      );
+    } else if (defaultedDivision === "equally_sole_account" && divisionIsReportable) {
+      sharingDiagnostics.push(
+        diagnostic(
+          "HSA_SOLE_SPOUSE_ACCOUNT_TAKES_ONLY_ITS_EQUAL_SHARE",
+          DiagnosticSeverity.INFO,
+          'Only one spouse has a health savings account, and no different division was agreed, so IRC 223(b)(5)(B)(ii) still divides the family limit equally between the spouses: this account takes half of it and the other half belongs to the spouse who has no account to use it. Owning the only HSA is not itself an agreement to a different division. If the spouses did agree to allocate the whole limit here, state it as hsaFamilyLimitDivision { status: "agreed", taxpayerShare } -- Notice 2004-50 Q&A-32 permits any division, "including allocating nothing to one spouse".',
           "accounts",
           "IRC 223(b)(5)(B)(ii)",
         ),
       );
-    } else {
-      for (const personId of coupleMembersWithAccounts) shareByOwner.set(personId, 1);
+    } else if (defaultedDivision === "equally" && divisionIsReportable) {
       sharingDiagnostics.push(
         diagnostic(
-          "HSA_SOLE_SPOUSE_ACCOUNT_ASSUMED_FULL_FAMILY_LIMIT",
+          "HSA_FAMILY_LIMIT_DIVIDED_EQUALLY_BY_DEFAULT",
           DiagnosticSeverity.INFO,
-          "Only one spouse has a health savings account, so the whole IRC 223(b)(5) family limit is allocated to it. That is the division the spouses are assumed to have agreed on; the statutory default absent an agreement is an equal division.",
+          'IRC 223(b)(5)(B)(ii) divides the single family contribution limit equally between the spouses unless they agree on a different division. Supply hsaFamilyLimitDivision as { status: "agreed", taxpayerShare } on the scenario to record a different agreement.',
           "accounts",
           "IRC 223(b)(5)(B)(ii)",
         ),
@@ -12933,9 +13253,9 @@ function initializeHsaPools(context: CalculationContext, accounts: NormalizedAcc
         diagnostic(
           "HSA_AGE_55_ADDITIONAL_CONTRIBUTION_IS_PER_SPOUSE",
           DiagnosticSeverity.INFO,
-          "The IRC 223(b)(3) additional contribution amount belongs to the individual, is excluded from the IRC 223(b)(5) family division, and must be contributed to that spouse's own HSA. Two spouses aged 55 or older therefore have two of them.",
+          "The IRC 223(b)(3) additional contribution amount belongs to the individual, is excluded from the IRC 223(b)(5) family division, and must be contributed to that spouse's own HSA: Notice 2008-59 Q&A-22 answers that question \"Yes\", and holds that an individual eligible to make catch-up contributions \"may only make such contributions to his or her own HSA\". Two spouses aged 55 or older therefore have two of them, and an agreed division allocating nothing to one spouse still leaves that spouse their own.",
           `persons.${ownerId}`,
-          "IRC 223(b)(3); IRC 223(b)(5)(B)",
+          "IRC 223(b)(3); IRC 223(b)(5)(B); Notice 2008-59 Q&A-22",
         ),
       );
     }
@@ -12950,13 +13270,13 @@ function initializeHsaPools(context: CalculationContext, accounts: NormalizedAcc
           );
 
     if (amounts.lastMonthRuleApplied && !indeterminate) {
-      const rules = facts.get(ownerId)!.rules!;
+      const lastMonthRule = facts.get(ownerId)!.lastMonthRule;
       const months = parameters.testingPeriodMonths ?? 13;
       let testingStatus: HsaTestingPeriodStatus;
-      if (rules.testingPeriodSatisfied === true) {
+      if (lastMonthRule.testingPeriodSatisfied === true) {
         testingStatus = "satisfied";
-      } else if (rules.testingPeriodSatisfied === false) {
-        testingStatus = rules.testingPeriodFailureByDeathOrDisability === true
+      } else if (lastMonthRule.testingPeriodSatisfied === false) {
+        testingStatus = lastMonthRule.testingPeriodFailureByDeathOrDisability === true
           ? "failed_exception_applies"
           : "failed";
       } else {
@@ -16128,6 +16448,9 @@ export function calculateScenario(input: ScenarioInput): ScenarioResult {
     input.treatedAsUnmarriedUnderSection21e4 === undefined
       ? null
       : input.treatedAsUnmarriedUnderSection21e4 === true;
+  validateHsaFamilyLimitDivision(input.hsaFamilyLimitDivision, "hsaFamilyLimitDivision");
+  const hsaFamilyLimitDivision: HsaFamilyLimitDivisionInput =
+    input.hsaFamilyLimitDivision ?? { status: "statutory_equal" };
   const persons = normalizePersons(input.persons);
   const accounts = normalizeAccounts(input.accounts, persons);
   const allocationOrder = [...accounts].sort(
@@ -16137,6 +16460,7 @@ export function calculateScenario(input: ScenarioInput): ScenarioResult {
     taxYear,
     filingStatus,
     treatedAsUnmarriedUnderSection21e4,
+    hsaFamilyLimitDivision,
     parameters,
     hsaParameters,
     fsaParameters,
@@ -16498,6 +16822,24 @@ export class PersonBuilder {
     return this;
   }
 
+  /**
+   * Elect the IRC 223(b)(8) last-month rule for this person. Omit the argument
+   * to leave the testing period unresolved. One election per person:
+   * IRC 223(b)(8)(A) treats "an individual", not an account.
+   */
+  public hsaLastMonthRule(testingPeriodSatisfied?: boolean): this {
+    const rule = (this.value.hsaLastMonthRule ??= {});
+    rule.useLastMonthRule = true;
+    if (testingPeriodSatisfied !== undefined) rule.testingPeriodSatisfied = testingPeriodSatisfied;
+    return this;
+  }
+
+  /** IRC 223(b)(8)(B)(ii): the testing period was failed because of death or disability. */
+  public hsaTestingPeriodFailureByDeathOrDisability(failed = true): this {
+    (this.value.hsaLastMonthRule ??= {}).testingPeriodFailureByDeathOrDisability = failed;
+    return this;
+  }
+
   public build(): PersonInput {
     return deepClone(this.value);
   }
@@ -16668,26 +17010,6 @@ export class AccountBuilder {
   /** Required for 2004-2006, when IRC 223(b)(2) capped the monthly limitation by the deductible. */
   public hsaHdhpAnnualDeductible(amount: Money): this {
     ((this.value.planRules ??= {}).hsa ??= {}).hdhpAnnualDeductible = amount;
-    return this;
-  }
-
-  /** Elect the IRC 223(b)(8) last-month rule. Omit the argument to leave the testing period unresolved. */
-  public hsaLastMonthRule(testingPeriodSatisfied?: boolean): this {
-    const hsa = ((this.value.planRules ??= {}).hsa ??= {});
-    hsa.useLastMonthRule = true;
-    if (testingPeriodSatisfied !== undefined) hsa.testingPeriodSatisfied = testingPeriodSatisfied;
-    return this;
-  }
-
-  /** IRC 223(b)(8)(B)(ii): the testing period was failed because of death or disability. */
-  public hsaTestingPeriodFailureByDeathOrDisability(failed = true): this {
-    ((this.value.planRules ??= {}).hsa ??= {}).testingPeriodFailureByDeathOrDisability = failed;
-    return this;
-  }
-
-  /** IRC 223(b)(5)(B)(ii) agreed share of the single family limit, 0 through 1. */
-  public hsaFamilyLimitShare(share: number): this {
-    ((this.value.planRules ??= {}).hsa ??= {}).familyLimitShare = share;
     return this;
   }
 
@@ -16882,6 +17204,30 @@ export class ScenarioBuilder {
     const builder = new RothConversionBuilder(id, ownerId, type, amount);
     configure?.(builder);
     return this.addConversion(builder);
+  }
+
+  /**
+   * IRC 223(b)(5)(B)(ii) agreed division of the one family limitation.
+   * `taxpayerShare` is the taxpayer's share from 0 through 1; the spouse takes
+   * the remainder. Notice 2004-50 Q&A-32 permits any division, "including
+   * allocating nothing to one spouse".
+   */
+  public hsaFamilyLimitDivision(taxpayerShare: number): this {
+    this.value.hsaFamilyLimitDivision = { status: "agreed", taxpayerShare };
+    return this;
+  }
+
+  /**
+   * Record that the IRC 223(b)(5)(B)(ii) division is not settled, so no share
+   * of the family limitation can be stated. `unknown` where the agreement fact
+   * was never obtained, `disputed` where the spouses report different
+   * divisions, `inconsistent` where two records of one division conflict.
+   */
+  public hsaFamilyLimitDivisionUnsettled(
+    status: "unknown" | "disputed" | "inconsistent" = "unknown",
+  ): this {
+    this.value.hsaFamilyLimitDivision = { status };
+    return this;
   }
 
   public build(): Scenario {

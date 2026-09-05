@@ -750,3 +750,34 @@ test("the dependent care builder reaches the IRC 129(b) earned income facts", ()
   assert.equal(dc.federalTaxEffects.federalAgiReduction, 0);
   assert.equal(dc.federalTaxEffects.ficaWageReduction, 4_000);
 });
+
+test("the IRC 223(b)(5)(B)(ii) division diagnostic does not claim a shared limit it is not reporting", () => {
+  // Both spouses hold family coverage all year in 2005, when IRC 223(b)(2) still
+  // capped each month by the plan's annual deductible, and the spouse's family
+  // plan states 400 -- below the 2005 family minimum of 2000 (Rev. Proc.
+  // 2004-71). That impeaches the division under Notice 2004-50 Q&A-31 *and*,
+  // because a family plan is a candidate for the IRC 223(b)(5)(A) lowest
+  // deductible, leaves the amount being divided undeterminable too. Both
+  // diagnostics fire, and the division one must not end by saying the shared
+  // limit still reports the limitation when the pool beside it is null.
+  const result = U.calculate({
+    taxYear: 2005,
+    filingStatus: FilingStatus.MARRIED_FILING_JOINTLY,
+    persons: [{ id: "t", birthYear: 1970 }, { id: "s", birthYear: 1972 }],
+    accounts: [
+      { id: "a", ownerId: "t", type: AccountType.HSA, planRules: { hsa: { coverageTier: "family", hdhpAnnualDeductible: 5_000 } } },
+      { id: "b", ownerId: "s", type: AccountType.HSA, planRules: { hsa: { coverageTier: "family", hdhpAnnualDeductible: 400 } } },
+    ],
+  });
+  const codes = result.diagnostics.map((entry) => entry.code);
+  assert.ok(codes.includes("HSA_SHARED_FAMILY_LIMIT_INDETERMINATE"));
+  const division = result.diagnostics.find((entry) => entry.code === "HSA_FAMILY_LIMIT_DIVISION_INDETERMINATE");
+  assert.ok(division, "expected the division diagnostic");
+  const pool = account(result, "a").sharedLimits.find((entry) => entry.id === "hsa223b5:t|s");
+  assert.equal(pool?.limit, null);
+  assert.ok(
+    !division.message.includes("shared limit still reports it"),
+    `division diagnostic claims a limit that is null: ${division.message}`,
+  );
+  assert.ok(division.message.includes("HSA_SHARED_FAMILY_LIMIT_INDETERMINATE"));
+});

@@ -773,6 +773,57 @@ test('the dependent care builder reaches the IRC 129(b) earned income facts', fu
     assertSameValue(4000.0, $dc['federalTaxEffects']['ficaWageReduction']);
 });
 
+
+test('the IRC 223(b)(5)(B)(ii) division diagnostic does not claim a shared limit it is not reporting', function (): void {
+    // Both spouses hold family coverage all year in 2005, when IRC 223(b)(2) still
+    // capped each month by the plan's annual deductible, and the spouse's family
+    // plan states 400 -- below the 2005 family minimum of 2000 (Rev. Proc.
+    // 2004-71). That impeaches the division under Notice 2004-50 Q&A-31 *and*,
+    // because a family plan is a candidate for the IRC 223(b)(5)(A) lowest
+    // deductible, leaves the amount being divided undeterminable too. Both
+    // diagnostics fire, and the division one must not end by saying the shared
+    // limit still reports the limitation when the pool beside it is null.
+    $result = U::calculate([
+        'taxYear' => 2005,
+        'filingStatus' => FilingStatus::MARRIED_FILING_JOINTLY->value,
+        'persons' => [['id' => 't', 'birthYear' => 1970], ['id' => 's', 'birthYear' => 1972]],
+        'accounts' => [
+            ['id' => 'a', 'ownerId' => 't', 'type' => 'hsa', 'planRules' => ['hsa' => [
+                'coverageTier' => 'family', 'hdhpAnnualDeductible' => 5000,
+            ]]],
+            ['id' => 'b', 'ownerId' => 's', 'type' => 'hsa', 'planRules' => ['hsa' => [
+                'coverageTier' => 'family', 'hdhpAnnualDeductible' => 400,
+            ]]],
+        ],
+    ]);
+    $codes = array_column($result['diagnostics'], 'code');
+    if (!in_array('HSA_SHARED_FAMILY_LIMIT_INDETERMINATE', $codes, true)) {
+        failTest('expected HSA_SHARED_FAMILY_LIMIT_INDETERMINATE');
+    }
+    $division = null;
+    foreach ($result['diagnostics'] as $entry) {
+        if ($entry['code'] === 'HSA_FAMILY_LIMIT_DIVISION_INDETERMINATE') {
+            $division = $entry;
+        }
+    }
+    if ($division === null) {
+        failTest('expected the division diagnostic');
+    }
+    $pool = null;
+    foreach ($result['accounts'][0]['sharedLimits'] as $entry) {
+        if ($entry['id'] === 'hsa223b5:t|s') {
+            $pool = $entry;
+        }
+    }
+    assertSameValue(null, $pool['limit']);
+    if (str_contains($division['message'], 'shared limit still reports it')) {
+        failTest('division diagnostic claims a limit that is null: ' . $division['message']);
+    }
+    if (!str_contains($division['message'], 'HSA_SHARED_FAMILY_LIMIT_INDETERMINATE')) {
+        failTest('division diagnostic does not point at the amount diagnostic');
+    }
+});
+
 $failed = 0;
 $started = microtime(true);
 foreach ($tests as $name => $body) {
