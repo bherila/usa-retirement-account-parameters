@@ -14419,9 +14419,9 @@ function appendSiblingCatchUpPoolBlockDiagnostic(
       diagnostic(
         code,
         DiagnosticSeverity.ERROR,
-        `No further catch-up is allocated because account ${blockedBy.id} records a pre-tax age-based catch-up that IRC 414(v)(7)(A) did not permit for this participant. The IRC 414(v) catch-up limit is the participant's rather than the plan's, and that amount has already been charged against it, so the capacity apparently left for this account is only correct if the contribution in doubt was valid. Reconcile the catch-up components on account ${blockedBy.id} before relying on this account's remaining catch-up capacity.`,
+        `No further catch-up is allocated because account ${blockedBy.id} records a pre-tax age-based catch-up that IRC 414(v)(7)(A) did not permit for this participant. The amount a participant may exclude as a catch-up is theirs for the taxable year rather than each plan's: IRC 402(g)(1)(C) capped what an eligible participant's gross income could exclude "without regard to the treatment of the elective deferrals by an applicable employer plan under section 414(v)", and Notice 2023-62 preserves that result after SECURE 2.0 section 603(b)(1) struck the subparagraph. So the block follows the participant and crosses employers, and the amount in doubt has already been charged against that one limit -- the capacity apparently left for this account is only correct if the contribution in doubt was valid. Reconcile the catch-up components on account ${blockedBy.id} before relying on this account's remaining catch-up capacity.`,
         `accounts.${account.id}`,
-        "IRC 414(v)(7)(A); IRC 414(v)(2)(B)",
+        "IRC 414(v)(7)(A); IRC 402(g)(1)(C) as preserved by Notice 2023-62",
       ),
     );
   }

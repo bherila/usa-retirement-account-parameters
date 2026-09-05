@@ -127,6 +127,38 @@ Source metadata documents provenance; it is not fetched at runtime. Calculations
   `evidence/retirement-limits/sources/usc-26-414.html` and fixed by `SHA256SUMS.txt`.
   `https://uscode.house.gov/view.xhtml?req=granuleid:USC-prelim-title26-section414&num=0&edition=prelim`
 
+- **26 U.S.C. §402(g)(1)(C), struck by SECURE 2.0 §603(b)(1), and Notice 2023-62** — why the
+  §414(v) catch-up pool is keyed to the participant rather than to the plan or the employer,
+  and why a catch-up that fails §414(v) falls back onto the ordinary elective-deferral limit.
+
+  §414(v)(2)(A) is a **plan**-level rule — *"A plan shall not permit additional elective
+  deferrals … greater than the lesser of"* — and 26 CFR 1.414(v)-1(f)(1) aggregates plans of
+  the *same employer* for it, and only "for purposes of paragraph (c)". Neither reaches an
+  individual holding plans at two unrelated employers. The participant-level cap came from
+  §402(g)(1)(C), which limited what **an eligible participant's gross income** could exclude
+  for **the taxable year**, *"without regard to the treatment of the elective deferrals by an
+  applicable employer plan under section 414(v)"* — a parenthetical that decouples the
+  individual's exclusion from any plan's treatment, which is exactly the two-employer case.
+
+  SECURE 2.0 §603(b)(1) **struck** that subparagraph, and it survives in the current Code only
+  in the amendment notes — where a text search finds it and can be mistaken for operative law.
+  **Notice 2023-62 preserves its result:** *"The elimination of section 402(g)(1)(C) of the
+  Code under section 603(b)(1) of the SECURE 2.0 Act does not change this result for taxable
+  years beginning after December 31, 2023"*, the result being that deferrals above the
+  §402(g)(1)(B) amount stay out of gross income if they satisfy §414(v).
+
+  Two consequences the engine depends on. The catch-up limit is one per participant per year
+  across every employer, so a block that follows the participant pool is correctly scoped.
+  And **validity decides which limitation an amount draws on**: a catch-up satisfying §414(v)
+  draws on the §414(v) limit and not the §402(g) one, while an amount that fails §414(v) is an
+  ordinary elective deferral subject to §402(g)(1)(A) unless corrected. That is why an amount
+  whose §414(v)(7)(A) validity is unresolved cannot be charged to either limitation as settled.
+
+  The notice is committed at `evidence/retirement-limits/sources/n-23-62.pdf` and hash-attested.
+  It is also the authority for the two-year transition period that makes
+  `rothCatchUpWageThreshold` null for catch-up years 2024 and 2025, which the corpus's
+  `reconciled` map asserts.
+
 - **26 CFR §1.414(v)-1** — the catch-up regulation, committed as
   `evidence/retirement-limits/sources/cfr-26-1.414v-1.xml`, the eCFR API serialization at
   issue date **2026-09-03**, and fixed by `SHA256SUMS.txt`. Retrieved from
