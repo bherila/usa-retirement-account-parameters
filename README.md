@@ -596,7 +596,7 @@ overstate one spouse's limitation in the second case. `unknown`, `disputed` and 
 differ only in the wording of the diagnostic they produce; they are deliberately identical in
 effect, and should stay that way.
 
-**A spouse who owns the only HSA still gets half.** §223(b)(5)(B)(ii) divides "equally between
+**A spouse who owns the only HSA still gets half — unless they are the only *eligible* one.** §223(b)(5)(B)(ii) divides "equally between
 them", and *them* is "individuals who are married to each other" from the opening clause of
 paragraph (5) — a phrase about a marriage, not about a pair of accounts. Owning an HSA is not a
 condition of being an eligible individual under §223(c)(1), so a spouse with family coverage and
@@ -607,6 +607,15 @@ reaches the whole $8,750 only through an agreement:
 ```ts
 { status: "agreed", taxpayerShare: 1 }   // Notice 2004-50 Q&A-32 permits exactly this
 ```
+
+The distinction is eligibility, not account ownership. Where the other spouse is stated to have held no
+HDHP coverage in any month (`hsaCoverage: {}`), they are not an eligible individual under §223(c)(1), take
+no share, and the owner gets the whole limitation — Notice 2004-50 Q&A-31: "if only one spouse is an
+eligible individual, only that spouse may contribute to an HSA (**notwithstanding** the treatment under
+section 223(b)(5)(A) of both spouses as having only family coverage)", worked by Example (1) of that Q&A.
+That case reports `HSA_SOLE_ELIGIBLE_SPOUSE_TAKES_WHOLE_FAMILY_LIMIT` instead. A spouse who stated nothing
+at all is not placed outside eligibility — absence of a statement is not a statement of absence — and takes
+their half.
 
 This changed in 0.5.0. Before it, an account-level model could not express a division at all, so
 the engine assumed a sole owner had agreed to take everything and reported

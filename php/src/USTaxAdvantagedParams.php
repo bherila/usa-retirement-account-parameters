@@ -13785,13 +13785,52 @@ final class Engine
                  * contradict a caller who has just said in so many words that no
                  * different division was agreed.
                  */
-                $spouses = $couple === null ? count($coupleMembersWithAccounts) : count($couple);
-                foreach ($coupleMembersWithAccounts as $personId) {
-                    $shareByOwner[$personId] = 1 / $spouses;
+                /*
+                 * Between spouses who are *eligible individuals*, which is neither
+                 * the whole couple nor the account owners. Notice 2004-50 Q&A-31
+                 * puts the qualification in so many words -- "if only one spouse is
+                 * an eligible individual, only that spouse may contribute to an HSA
+                 * (notwithstanding the treatment under section 223(b)(5)(A) of both
+                 * spouses as having only family coverage)" -- and its Example (1)
+                 * gives H the whole 5000 because W's plan is not a high deductible
+                 * health plan. The "notwithstanding" is the load-bearing word:
+                 * subparagraph (A) deems both spouses to have family coverage, and
+                 * that deeming does not make an ineligible spouse eligible for this
+                 * purpose.
+                 *
+                 * Only a spouse the caller has positively placed outside
+                 * eligibility is excluded: hsaCoverage of {} records that this
+                 * person held no high deductible health plan coverage in any month,
+                 * so every resolved slot is "none". A spouse who stated nothing at
+                 * all has no slots and is not excluded -- absence of a statement is
+                 * not a statement of absence -- and neither is a spouse eligible in
+                 * even one month.
+                 */
+                $eligibleSpouses = [];
+                foreach (($couple ?? $coupleMembersWithAccounts) as $personId) {
+                    $slots = $coverageSlotsByPerson[$personId] ?? null;
+                    $anyCovered = false;
+                    foreach ($slots ?? [] as $slot) {
+                        if ($slot !== 'none') {
+                            $anyCovered = true;
+                            break;
+                        }
+                    }
+                    if ($slots === null || $anyCovered) {
+                        $eligibleSpouses[] = $personId;
+                    }
                 }
-                $defaultedDivision = count($coupleMembersWithAccounts) < $spouses
-                    ? 'equally_sole_account'
-                    : 'equally';
+                $spouses = max(count($eligibleSpouses), 1);
+                foreach ($coupleMembersWithAccounts as $personId) {
+                    // An ineligible spouse who nonetheless owns an HSA takes no
+                    // share; Q&A-31 lets only the eligible spouse contribute.
+                    $shareByOwner[$personId] = in_array($personId, $eligibleSpouses, true)
+                        ? 1 / $spouses
+                        : 0.0;
+                }
+                $defaultedDivision = count($eligibleSpouses) < 2
+                    ? 'sole_eligible_spouse'
+                    : (count($coupleMembersWithAccounts) < $spouses ? 'equally_sole_account' : 'equally');
             }
         }
 
@@ -13958,7 +13997,21 @@ final class Engine
             // that the engine settled it without being told; $householdDivisionUnknown
             // says it did not settle after all, and announcing a default alongside
             // a null share would contradict the same result twice over.
-            if ($defaultedDivision === 'equally_sole_account' && $divisionIsReportable) {
+            if ($defaultedDivision === 'sole_eligible_spouse' && $divisionIsReportable) {
+                $sharingDiagnostics[] = self::diagnostic(
+                    'HSA_SOLE_ELIGIBLE_SPOUSE_TAKES_WHOLE_FAMILY_LIMIT',
+                    DiagnosticSeverity::INFO,
+                    'The other spouse is stated to have held no high deductible health plan coverage in any month, '
+                        . 'so they are not an eligible individual and take no share of the family limit. Notice '
+                        . '2004-50 Q&A-31: "if only one spouse is an eligible individual, only that spouse may '
+                        . 'contribute to an HSA (notwithstanding the treatment under section 223(b)(5)(A) of both '
+                        . 'spouses as having only family coverage)", and Example (1) of that Q&A gives the whole '
+                        . 'limitation to the eligible spouse. This is not an equal division and is not an agreement; '
+                        . 'it is the consequence of the coverage facts supplied.',
+                    'accounts',
+                    'IRC 223(b)(5)(B)(ii); Notice 2004-50 Q&A-31',
+                );
+            } elseif ($defaultedDivision === 'equally_sole_account' && $divisionIsReportable) {
                 $sharingDiagnostics[] = self::diagnostic(
                     'HSA_SOLE_SPOUSE_ACCOUNT_TAKES_ONLY_ITS_EQUAL_SHARE',
                     DiagnosticSeverity::INFO,

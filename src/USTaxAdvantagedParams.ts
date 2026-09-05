@@ -12824,7 +12824,7 @@ function initializeHsaPools(context: CalculationContext, accounts: NormalizedAcc
    * decided until `divisionEligibilityDoubtPersons` below, which reads the
    * shares, so the branch is recorded here and reported afterwards.
    */
-  let defaultedDivision: "equally" | "equally_sole_account" | null = null;
+  let defaultedDivision: "equally" | "equally_sole_account" | "sole_eligible_spouse" | null = null;
   if (familySharingApplies) {
     /**
      * One number, not one per account: a share is a share of the couple's
@@ -12873,11 +12873,47 @@ function initializeHsaPools(context: CalculationContext, accounts: NormalizedAcc
        * most often needed, and would contradict a caller who has just said in
        * so many words that no different division was agreed.
        */
-      const spouses = couple ? couple.length : coupleMembersWithAccounts.length;
+      /**
+       * Between spouses who are *eligible individuals*, which is neither the
+       * whole couple nor the account owners. Notice 2004-50 Q&A-31 puts the
+       * qualification in so many words -- "if only one spouse is an eligible
+       * individual, only that spouse may contribute to an HSA (notwithstanding
+       * the treatment under section 223(b)(5)(A) of both spouses as having only
+       * family coverage)" -- and its Example (1) gives H the whole 5000 because
+       * W's plan is not a high deductible health plan. The "notwithstanding" is
+       * the load-bearing word: subparagraph (A) deems both spouses to have
+       * family coverage, and that deeming does not make an ineligible spouse
+       * eligible for this purpose.
+       *
+       * Only a spouse the caller has positively placed outside eligibility is
+       * excluded: `hsaCoverage: {}` records that this person held no high
+       * deductible health plan coverage in any month, so every resolved slot is
+       * "none" and there is no month in which they could be an eligible
+       * individual. A spouse who stated nothing at all has no slots and is not
+       * excluded -- absence of a statement is not a statement of absence, and
+       * subparagraph (A) deems them covered -- and neither is a spouse eligible
+       * in even one month, who holds a share of their own.
+       *
+       * A spouse whose stated eligibility is *contradicted* rather than denied
+       * is a third case and is not decided here: that is the impeached-assertion
+       * path, which leaves the division indeterminate rather than resolving it
+       * either way.
+       */
+      const eligibleSpouses = (couple ?? coupleMembersWithAccounts).filter((personId) => {
+        const slots = coverageSlotsByPerson.get(personId);
+        return slots === undefined || slots.some((slot) => slot !== "none");
+      });
+      const spouses = Math.max(eligibleSpouses.length, 1);
       for (const personId of coupleMembersWithAccounts) {
-        shareByOwner.set(personId, 1 / spouses);
+        // An ineligible spouse who nonetheless owns an HSA takes no share of the
+        // couple's limitation; Q&A-31 lets only the eligible spouse contribute.
+        shareByOwner.set(personId, eligibleSpouses.includes(personId) ? 1 / spouses : 0);
       }
-      defaultedDivision = coupleMembersWithAccounts.length < spouses ? "equally_sole_account" : "equally";
+      defaultedDivision = eligibleSpouses.length < 2
+        ? "sole_eligible_spouse"
+        : spouses > coupleMembersWithAccounts.length
+          ? "equally_sole_account"
+          : "equally";
     }
   }
 
@@ -13025,7 +13061,17 @@ function initializeHsaPools(context: CalculationContext, accounts: NormalizedAcc
     // the engine settled it without being told; `householdDivisionUnknown` says
     // it did not settle after all, and announcing a default alongside a null
     // share would contradict the same result twice over.
-    if (defaultedDivision === "equally_sole_account" && divisionIsReportable) {
+    if (defaultedDivision === "sole_eligible_spouse" && divisionIsReportable) {
+      sharingDiagnostics.push(
+        diagnostic(
+          "HSA_SOLE_ELIGIBLE_SPOUSE_TAKES_WHOLE_FAMILY_LIMIT",
+          DiagnosticSeverity.INFO,
+          'The other spouse is stated to have held no high deductible health plan coverage in any month, so they are not an eligible individual and take no share of the family limit. Notice 2004-50 Q&A-31: "if only one spouse is an eligible individual, only that spouse may contribute to an HSA (notwithstanding the treatment under section 223(b)(5)(A) of both spouses as having only family coverage)", and Example (1) of that Q&A gives the whole limitation to the eligible spouse. This is not an equal division and is not an agreement; it is the consequence of the coverage facts supplied.',
+          "accounts",
+          "IRC 223(b)(5)(B)(ii); Notice 2004-50 Q&A-31",
+        ),
+      );
+    } else if (defaultedDivision === "equally_sole_account" && divisionIsReportable) {
       sharingDiagnostics.push(
         diagnostic(
           "HSA_SOLE_SPOUSE_ACCOUNT_TAKES_ONLY_ITS_EQUAL_SHARE",
